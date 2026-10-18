@@ -1,4 +1,4 @@
-from betbot.collectors.espn import _num, parse, pick
+from betbot.nfl.collectors.espn import _num, parse, pick
 
 # trimmed from a real ESPN response
 ITEM = {

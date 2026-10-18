@@ -1,7 +1,7 @@
 from betbot import db
-from betbot.collectors.espn import parse_injuries
-from betbot.collectors.nflverse import replace_table
-from betbot.signals.injuries import flags, practice, starters
+from betbot.nfl.collectors.espn import parse_injuries
+from betbot.nfl.collectors.nflverse import replace_table
+from betbot.nfl.signals.injuries import flags, practice, starters
 
 PRACTICE_COLS = ["season", "week", "gsis_id", "practice_status", "practice_primary_injury", "report_primary_injury"]
 SNAP_COLS = ["game_id", "week", "player", "position", "team", "offense_pct", "defense_pct"]

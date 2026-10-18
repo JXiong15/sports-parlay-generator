@@ -1,7 +1,7 @@
 from betbot import db
-from betbot.collectors.nflverse import current_season, replace_table
+from betbot.nfl.collectors.nflverse import current_season, replace_table
 from betbot.names import normalize
-from betbot.signals.regression import evaluate
+from betbot.nfl.signals.regression import evaluate
 
 NOW = "2026-10-18T12:00:00Z"
 SEASON = current_season()

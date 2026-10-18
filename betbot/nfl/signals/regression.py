@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 from statistics import mean, median
 
 from betbot import db
-from betbot.collectors.nflverse import current_season
-from betbot.names import TEAMS, normalize
-from betbot.signals import injuries
+from betbot.nfl.collectors.nflverse import current_season
+from betbot.names import normalize
+from betbot.nfl.teams import TEAMS
+from betbot.nfl.signals import injuries
 
 # Odds API market -> (nflverse stat column, position groups that can hold the prop; used to split same-name players)
 MARKETS = {

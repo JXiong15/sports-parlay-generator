@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 import requests
 
 from betbot import db
-from betbot.names import TEAMS, normalize
+from betbot.names import normalize
+from betbot.nfl.teams import TEAMS
 
 INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
 ODDS_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/{0}/competitions/{0}/odds"
@@ -108,7 +109,7 @@ def unfetched_finished(conn, first_season):
 
 
 if __name__ == "__main__":
-    # backfill past games for backtesting: python -m betbot.collectors.espn 2024
+    # backfill past games for backtesting: python -m betbot.nfl.collectors.espn 2024
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
     games = unfetched_finished(conn, int(sys.argv[1]) if len(sys.argv) > 1 else 2024)
     print(f"fetching {len(games)} games...")

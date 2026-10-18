@@ -1,5 +1,5 @@
 from betbot import db
-from betbot.collectors.nflverse import _value, is_stale, replace_table
+from betbot.nfl.collectors.nflverse import _value, is_stale, replace_table
 
 
 def test_value_types():
@@ -28,7 +28,7 @@ def test_is_stale():
 
 
 def test_load_only_refreshes_current_season(monkeypatch):
-    from betbot.collectors import nflverse
+    from betbot.nfl.collectors import nflverse
     conn = db.connect(":memory:")
     replace_table(conn, "nfl_player_weeks", ["season", "game_id"], [[2010, "old"], [2026, "stale"]])
     files = {nflverse.GAMES_URL: (["game_id"], [["g"]]),

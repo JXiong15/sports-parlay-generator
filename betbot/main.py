@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from betbot import db
-from betbot.collectors import espn, nflverse, odds_api
+from betbot.collectors import odds_api
+from betbot.nfl.collectors import espn, nflverse
 
 
 def print_line_moves(conn):

@@ -15,7 +15,7 @@ Each run costs 1 credit per game starting in the next 24h (free tier: 500/month)
 
 ## NFL history (free, no key)
 ```
-python -m betbot.collectors.nflverse        # every game since 1999 + weekly player stats
-python -m betbot.collectors.nflverse 2015   # or start from a later season
+python -m betbot.nfl.collectors.nflverse        # every game since 1999 + weekly player stats
+python -m betbot.nfl.collectors.nflverse 2015   # or start from a later season
 ```
 `python -m betbot.main` reloads this automatically when it is out of date.
