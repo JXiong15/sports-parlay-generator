@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from betbot import db
 from betbot.collectors import action_network, dk_network, odds_api
-from betbot.nfl import board, grader
+from betbot.nfl import board, grader, parlays
 from betbot.nfl.collectors import espn, nflverse, weather
 
 
@@ -84,6 +84,7 @@ def collect():
         print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
         print(f"graded: {grader.grade(conn)} finished picks")
         board.print_board(picks)
+        parlays.print_parlays(*parlays.build(conn, picks))
 
 
 if __name__ == "__main__":

@@ -23,28 +23,32 @@ It is a decision aid, not a "sure thing" generator. No bet is guaranteed. Bet on
 
 Everything is saved to `betbot.db`, so later runs only fetch what's new.
 
-Then check the picks:
+Then it builds the board: every prop and game pick with our probability, the book's price, the betting splits
+and line movement, and a verdict (BET / FADE / STAY AWAY). It logs each pick, grades finished ones, and suggests
+parlays. Pieces can also be run on their own (see Commands).
 
-```
-python3 -m betbot.nfl.signals.regression
-```
+> **Backtest result: no proven edge.** Game lines 1999-2026 hit 51.6% (spreads) / 50.2% (totals) against the
+> closing line, where 52.4% breaks even at -110, with coin-flip accuracy. Player props on 6 weeks of real
+> DraftKings lines hit 52.6% after recalibration, i.e. break-even. Treat every pick as research, not a likely winner.
 
-```
-UNDER Jordan Love: line 271.5 (last 367, 20-game mean 246.2 / median 246.5)
-      ! Jordan Love practiced fully this week (Knee)
-      ! CHI missing: CB Some Player (Out)
-```
+## How it decides
 
-## Signals (what it looks for)
-
-| Signal | Status | What it does |
-|---|---|---|
-| Regression ("chasing yesterday") | Built | Lean UNDER when a big last game pushed the line above the player's 20-game average and median |
-| Injury context | Built (flags only) | Flags the player if he's hurt or limited in practice, his team's starters who are out, and the opponent's defensive starters who are out |
-| Line movement, trap lines, sharp vs. public money, steam | Not yet | Data is collected (opening/current lines, betting %); the rules aren't written yet |
-| Decision (BET / FADE / STAY AWAY) and EV | Not yet | |
-
-Thresholds are untested guesses until they're backtested. Flags don't change any numbers yet.
+1. **Player model** (`nfl/model.py`): a recency-weighted average of the player's earlier games, adjusted for the
+   opponent's defense vs. his position, team implied points, spread (game script), wind, cold, home, usage trend,
+   injury report and practice status, starting QB out, and opposing defensive starters out. The size of each
+   adjustment is fitted on past seasons. The spread of past errors turns the expectation into P(Over).
+2. **Game model** (`nfl/game_model.py`): team ratings from points scored and allowed in earlier games, plus
+   home-field edge, giving P(cover), P(over) and P(win).
+3. **Recalibration**: both models' probabilities are corrected by how earlier predictions actually hit
+   (walk-forward), and props again by how they did against real sportsbook lines. This pulls overconfident
+   numbers toward 50%.
+4. **Decision** (`decision.py`): no clear edge (EV under +2% or under 3 points over the book's no-vig
+   probability) -> STAY AWAY; sharp money against us, a bait line or steam against us -> STAY AWAY; fading a heavy
+   public with sharp money on our side -> FADE; otherwise BET.
+5. **Parlays** (`parlay.py`, `nfl/parlays.py`): only positive-EV legs; same-game legs use correlations measured
+   from 2013-2025 results (e.g. QB passing yards vs. the game total: +0.28); shows the true combined probability,
+   the probability if legs were independent, the price and EV.
+6. **Grading** (`nfl/grader.py`): after each game, every logged pick gets its result and closing line value.
 
 ## What the app compares
 
@@ -161,6 +165,10 @@ python3 -m betbot.collectors.dk_network nfl --all  # save every DraftKings prop-
 python3 -m betbot.nfl.prop_splits              # saved prop splits as a table, by season and week (free)
 python3 -m betbot.nfl.collectors.weather       # this week's kickoff forecasts (free)
 python3 -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
+python3 -m betbot.nfl.board                    # this week's verdicts from saved data (free)
+python3 -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
+python3 -m betbot.nfl.grader                   # grade finished picks (free)
+python3 -m betbot.nfl.backtest                 # hit rate, calibration, Brier, CLV on past games (free)
 python3 -m pytest                              # tests (fake data, no internet, no credits)
 ```
 
@@ -176,6 +184,10 @@ requests, and only lines or prices that actually changed are saved.
 betbot/
   main.py                      one full run
   db.py                        SQLite tables + save helpers
+  odds.py                      implied probability, vig removal, EV
+  decision.py                  BET / FADE / STAY AWAY
+  parlay.py                    correlated parlay probability and EV
+  predictions.py               logs every pick for grading
   names.py                     player-name matching across sources
   collectors/
     odds_api.py                prop lines (every sport)
@@ -189,6 +201,11 @@ betbot/
     collectors/weather.py      kickoff forecasts
     collectors/archive_splits.py  past game splits from Internet Archive copies
     views.py                   combined views (usage, defense vs. position, game context)
+    model.py                   player stat model and P(Over)
+    game_model.py              team ratings, P(cover / over / win)
+    board.py                   this week's picks and verdicts
+    parlays.py, correlation.py parlays and same-game correlations
+    grader.py, backtest.py     grading and backtests
     signals/regression.py      "chasing yesterday" picks
     signals/injuries.py        injury flags
 tests/                         mirrors betbot/
@@ -211,6 +228,9 @@ Other sports will get their own folder next to `nfl/`.
 | `nfl_game_lines` | Opening, current and closing total, spread and moneyline, with prices, per game (2024+) |
 | `splits` | Public % of bets / money with DraftKings' line and price, one row per fetch |
 | `archive_splits`, `archive_captures` | Past game % of bets / money from archived pages (matched to nflverse games), and which saved copies were imported |
+| `predictions` | Every pick when made (side, line, price, our probability, book's no-vig probability), then its result and closing line value |
+| `model_params`, `parlay_correlations` | Fitted model coefficients and measured same-game correlations |
+| `nfl_injury_reports` | Official injury and practice reports since 2009 (the model learns from them) |
 | `dk_articles`, `prop_splits` | DraftKings prop-split articles saved, and each prop's line, % of tickets and % of handle |
 
 Ready-made views combine these: `nfl_player_usage` (snap %, targets, target share per game),
@@ -222,6 +242,12 @@ rebuilt by running the collectors again, but not the saved Odds API lines, betti
 splits, because those sources don't keep old data. Back the file up somewhere safe.
 
 ## Known limits
+
+- **No proven edge yet** (see the backtest above). Decision thresholds are reasonable defaults, not backtested.
+- Prop backtests cover only 6 weeks of real lines, with -110 assumed (the DraftKings articles show no prices).
+  Historical prop lines with prices cost money (The Odds API ~$59 for a month covers 2023 on; EndzoneAPI ~$19 a season).
+- Same-game parlays: books price them with their own correlation adjustments, usually paying less than the
+  multiplied odds shown here.
 
 - ESPN's feeds and Action Network's page are unofficial and can break without notice; the app errors instead of saving
   bad data.

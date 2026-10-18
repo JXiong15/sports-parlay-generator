@@ -177,6 +177,11 @@ CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded aft
     graded_at TEXT,
     UNIQUE (kind, game_id, player_id, market, side, book, line)
 );
+CREATE TABLE IF NOT EXISTS parlay_correlations (  -- same-game outcome correlations measured from history
+    key TEXT PRIMARY KEY,      -- e.g. receiving_yards|passing_yards|teammates, passing_yards|T, H|T
+    value TEXT NOT NULL,       -- JSON [rho, pairs]
+    computed_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 

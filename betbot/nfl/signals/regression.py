@@ -106,7 +106,8 @@ def evaluate(conn, market="player_pass_yds", now=None):
         games = [r[0] or 0 for r in history]
         team, teams = history[0][1], {TEAMS.get(home), TEAMS.get(away)}
         opponent = next(iter(teams - {team}), None) if team in teams else None
-        result = {"player": player, "player_id": player_id, "market": market, "line": line, "games": len(games),
+        result = {"player": player, "player_id": player_id, "team": team, "market": market, "line": line,
+                  "games": len(games),
                   "lean": None, "p_over": None, "book": offer["book"], "over_price": offer["over_price"],
                   "under_price": offer["under_price"], "event_id": offer["event_id"], "game_id": None,
                   "flags": injuries.flags(conn, player, player_id, team, opponent, stat)}
