@@ -84,9 +84,10 @@ def player_index(conn, positions, since_season):
     return index
 
 
-def evaluate(conn, market="player_pass_yds", now=None):
+def evaluate(conn, market="player_pass_yds", now=None, shared=None):
     """Returns (results, problems). problems lists props whose player could not be matched to nflverse.
-    Each result has the model's p_over (probability of going Over the line) unless the player can't be modeled."""
+    Each result has the model's p_over (probability of going Over the line) unless the player can't be modeled.
+    shared: optional {"context", "flags"} model inputs, so callers evaluating several markets build them once."""
     stat, positions = MARKETS[market]
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     index = player_index(conn, positions, current_season() - 1)
@@ -131,13 +132,15 @@ def evaluate(conn, market="player_pass_yds", now=None):
         if blew_past and inflated:
             result["lean"] = "UNDER"
     if upcoming:
-        _add_probabilities(conn, stat, positions, results, pd.DataFrame(upcoming))
+        _add_probabilities(conn, stat, positions, results, pd.DataFrame(upcoming), shared)
     return results, problems
 
 
-def _add_probabilities(conn, stat, positions, results, upcoming):
+def _add_probabilities(conn, stat, positions, results, upcoming, shared=None):
+    shared = shared or {}
     params = model.fitted(conn, stat, positions)
-    df = model.predict(model.features(conn, stat, positions, upcoming), params)
+    df = model.predict(model.features(conn, stat, positions, upcoming, context=shared.get("context"),
+                                      flags=shared.get("flags")), params)
     df = df[df["y"].isna()].set_index(["player_id", "game_id"])
     for r in results:
         key = (r["player_id"], r["game_id"])

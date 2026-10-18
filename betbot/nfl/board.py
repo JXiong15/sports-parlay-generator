@@ -22,12 +22,16 @@ def _now():
 # ---------- props ----------
 
 def _prop_splits(conn, player, market, line):
-    """This week's DraftKings ticket/handle % for this prop (newest article within 7 days), or None."""
-    return conn.execute(
-        "SELECT p.over_bets, p.over_handle FROM prop_splits p JOIN dk_articles a ON a.id = p.article_id"
-        " WHERE p.player = ? AND p.market = ? AND p.line = ? AND p.period IS NULL"
-        " AND a.published >= date('now', '-7 days') ORDER BY a.published DESC LIMIT 1",
-        (player, market, line)).fetchone()
+    """This week's DraftKings ticket/handle % for this prop (newest article within 7 days), or None. Names are
+    matched loosely ('Kenneth Walker III' = 'Kenneth Walker'), as the Odds API and DraftKings spell them differently."""
+    key = normalize(player)
+    for name, bets, handle in conn.execute(
+            "SELECT p.player, p.over_bets, p.over_handle FROM prop_splits p JOIN dk_articles a ON a.id = p.article_id"
+            " WHERE p.market = ? AND p.line = ? AND p.period IS NULL AND a.published >= date('now', '-7 days')"
+            " ORDER BY a.published DESC", (market, line)):
+        if normalize(name) == key:
+            return bets, handle
+    return None
 
 
 def _prop_first_line(conn, r):
@@ -42,9 +46,10 @@ def prop_picks(conn, now=None):
     now = now or _now()
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
+    shared = {"context": model.game_context(conn), "flags": model.injury_flags(conn)}  # same for every market
     out = []
     for market in markets:
-        results, _ = regression.evaluate(conn, market, now)
+        results, _ = regression.evaluate(conn, market, now, shared)
         for r in results:
             if r.get("p_over") is None:
                 continue
@@ -106,10 +111,12 @@ def _game_offers(conn, event_id):
     return out
 
 
-def _game_splits(conn, home, market, side):
-    """Latest Action Network (bets %, money %) for this side; money is None where the free page didn't show it."""
+def _game_splits(conn, home, market, side, kickoff):
+    """Latest Action Network (bets %, money %) for this side of THIS game (kickoff within a day); money is None
+    where the free page didn't show it."""
     row = conn.execute("SELECT bets_pct, money_pct FROM splits WHERE home_team = ? AND market = ? AND side = ?"
-                       " ORDER BY fetched_at DESC LIMIT 1", (home, market, side)).fetchone()
+                       " AND abs(julianday(start_time) - julianday(?)) < 1 ORDER BY fetched_at DESC LIMIT 1",
+                       (home, market, side, kickoff)).fetchone()
     return row if row else (None, None)
 
 
@@ -118,9 +125,10 @@ def game_picks(conn, now=None):
     g = game_model.predict(game_model.games(conn))
     calib = _game_calibrations(g)
     by_game = g.set_index("game_id")
-    events = conn.execute("SELECT id, home_team, away_team FROM events WHERE commence_time > ?", (now,)).fetchall()
+    events = conn.execute("SELECT id, home_team, away_team, commence_time FROM events WHERE commence_time > ?",
+                          (now,)).fetchall()
     out = []
-    for event_id, home, away in events:
+    for event_id, home, away, kickoff in events:
         h, a = TEAMS.get(home), TEAMS.get(away)
         game = regression.find_game(conn, h, a, now) if h and a else None
         if not game or game[0] not in by_game.index:
@@ -128,8 +136,9 @@ def game_picks(conn, now=None):
         r = by_game.loc[game[0]]
         lines = conn.execute("SELECT open_home_spread, current_home_spread, open_total, current_total"
                              " FROM nfl_game_lines WHERE game_id = ?", (game[0],)).fetchone()
+        offers = _game_offers(conn, event_id)
         for odds_market, market in GAME_MARKETS.items():
-            offer = _game_offers(conn, event_id).get(odds_market)
+            offer = offers.get(odds_market)
             if not offer:
                 continue
             book, sides = offer
@@ -142,7 +151,7 @@ def game_picks(conn, now=None):
             else:
                 if home not in sides or away not in sides:
                     continue
-                spread = _game_offers(conn, event_id).get("spreads")
+                spread = offers.get("spreads")
                 home_spread = spread[1][home][0] if spread and home in spread[1] else None
                 if market == "spread":
                     line = sides[home][0]
@@ -159,7 +168,7 @@ def game_picks(conn, now=None):
             pick_a = p_a >= 0.5
             name, other, side = (a_name, b_name, a_side) if pick_a else (b_name, a_name, b_side)
             prob = float(p_a if pick_a else 1 - p_a)
-            bets, money = _game_splits(conn, home, market, side)
+            bets, money = _game_splits(conn, home, market, side, kickoff)
             moved = None
             if lines and market == "spread" and lines[0] is not None and lines[1] is not None:
                 toward_home = lines[0] - lines[1]   # home spread getting more negative = market likes home

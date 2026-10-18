@@ -29,10 +29,15 @@ def _value(s):
     return s
 
 
-def _csv(url):
+def _csv(url, optional=False):
+    """(header, rows). optional: a file nflverse hasn't published yet (404) or an empty one gives ([], [])."""
     resp = requests.get(url, timeout=120)
+    if optional and resp.status_code == 404:
+        return [], []
     resp.raise_for_status()
     rows = list(csv.reader(io.StringIO(resp.text)))
+    if not rows:
+        return [], []
     return rows[0], [[_value(v) for v in r] for r in rows[1:]]
 
 
@@ -57,11 +62,12 @@ def replace_table(conn, table, header, rows):
     _insert(conn, table, header, rows)
 
 
-# tables kept per season: (table, url, first season nflverse has)
+# tables kept per season: (table, url, first season nflverse has, optional: may not exist yet for this season)
 SEASONAL = (
-    ("nfl_player_weeks", PLAYER_WEEK_URL, 1999),
-    ("nfl_snap_counts", SNAP_COUNTS_URL, 2013),  # the 2012 file is empty
-    ("nfl_injury_reports", INJURIES_URL, 2009),  # official injury/practice reports, for the model to learn from
+    ("nfl_player_weeks", PLAYER_WEEK_URL, 1999, False),
+    ("nfl_snap_counts", SNAP_COUNTS_URL, 2013, False),  # the 2012 file is empty
+    # official injury/practice reports, for the model to learn from; not published until the season starts
+    ("nfl_injury_reports", INJURIES_URL, 2009, True),
 )
 
 
@@ -91,10 +97,15 @@ def load(conn, first_season=None):
     header, games = _csv(GAMES_URL)
     players_header, players = _csv(PLAYERS_URL)
     downloads = []
-    for table, url, since in SEASONAL:
+    for table, url, since, optional in SEASONAL:
         saved = _first_saved_season(conn, table)
         start = max(first_season, since) if saved is not None and saved <= since else since
-        season_header, rows = _align([_csv(url.format(season)) for season in range(start, current_season() + 1)])
+        files = [_csv(url.format(season), optional) for season in range(start, current_season() + 1)]
+        files = [f for f in files if f[0]]
+        if not files:
+            print(f"{table}: nothing published for {start}-{current_season()} yet, kept as is")
+            continue
+        season_header, rows = _align(files)
         print(f"{table}: {len(rows)} rows for {start}-{current_season()}")
         downloads.append((table, season_header, rows, start, start == since))
     # one transaction so a failed download never leaves a half-empty table
@@ -117,7 +128,7 @@ def load(conn, first_season=None):
 
 def update_practice_reports(conn):
     """This season's official injury/practice reports; small, and they change daily during the week, so refresh every run."""
-    header, rows = _csv(INJURIES_URL.format(current_season()))
+    header, rows = _csv(INJURIES_URL.format(current_season()), optional=True)
     if rows:
         with conn:
             replace_table(conn, "nfl_practice_reports", header, rows)

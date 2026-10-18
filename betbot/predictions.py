@@ -47,8 +47,7 @@ def log_games(conn, picks, made_at=None):
     rows = []
     for p in picks:
         fair, vig_removed = no_vig(p["price"], p.get("other_price"))
-        # "" not NULL: NULLs never count as duplicates, so re-runs would re-log the same game pick
-        rows.append(dict(p, kind="game", made_at=made_at, event_id=None, player=None, player_id="",
+        rows.append(dict(p, kind="game", made_at=made_at, event_id=None, player=None, player_id=None,
                          implied_prob=fair, vig_removed=int(vig_removed), p_over=None, mu=p.get("mu")))
     with conn:
         return db.save_predictions(conn, rows)

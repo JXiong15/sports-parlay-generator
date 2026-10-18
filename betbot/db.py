@@ -191,6 +191,7 @@ MIGRATIONS = {
     "nfl_game_lines": [f"{k}_{c} INTEGER" for k in ("open", "current", "close") for c in (
         "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
+    "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
 }
 
 
@@ -310,10 +311,11 @@ PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "playe
 
 
 def save_predictions(conn, rows):
-    """Keeps the first logging of each pick (same game, player, market, side, book and line). Compared with IS so
-    empty values (moneylines have no line) still count as the same pick."""
+    """Keeps the first logging of each prop or game market (same game, player, market and book), compared with IS so
+    empty values still match."""
     cols = ", ".join(PREDICTION_COLUMNS)
-    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market", "side", "book", "line"))
+    # one pick per prop or game market: a later run whose favored side or line changed isn't a second bet
+    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market", "book"))
     cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
                            f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
                            f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",

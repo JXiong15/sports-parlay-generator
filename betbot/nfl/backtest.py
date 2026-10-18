@@ -91,9 +91,10 @@ def _walk_forward_calibration(seasons, raw, won, min_rows=500):
 def game_clv(conn, g):
     """Picks made at ESPN's opening line (2024 on): how often the closing line moved our way, in points."""
     lines = pd.read_sql_query("SELECT game_id, open_home_spread, close_home_spread, open_total, close_total"
-                              " FROM nfl_game_lines WHERE open_home_spread IS NOT NULL AND close_home_spread IS NOT NULL",
-                              conn)
-    d = g.merge(lines, on="game_id")
+                              " FROM nfl_game_lines", conn)
+    both = g.merge(lines, on="game_id")
+    d = both.dropna(subset=["open_home_spread", "close_home_spread"])
+    t = both.dropna(subset=["open_total", "close_total"])  # a game can have spreads but no totals
     if d.empty:
         return {"n": 0}
     p_home = np.array([game_model.p_home_covers(m, hs, sd) for m, hs, sd in
@@ -101,10 +102,10 @@ def game_clv(conn, g):
     # points gained vs. the close: home bettor gains when the home spread shrinks (e.g. -3 at open, -4.5 at close)
     move = d["open_home_spread"] - d["close_home_spread"]
     spread_clv = np.where(p_home >= 0.5, move, -move)
-    p_o = np.array([game_model.p_over(m, t, sd) for m, t, sd in zip(d["pred_total"], d["open_total"], d["sigma_total"])])
-    tmove = d["close_total"] - d["open_total"]
-    total_clv = np.where(p_o >= 0.5, tmove, -tmove)
-    return {"n": int(len(d)), "spread_avg_points": round(float(spread_clv.mean()), 3),
+    p_o = np.array([game_model.p_over(m, x, sd) for m, x, sd in zip(t["pred_total"], t["open_total"], t["sigma_total"])])
+    tmove = t["close_total"] - t["open_total"]
+    total_clv = np.where(p_o >= 0.5, tmove, -tmove) if len(t) else np.array([np.nan])
+    return {"n": int(len(d)), "total_n": int(len(t)), "spread_avg_points": round(float(spread_clv.mean()), 3),
             "spread_beat_close": round(float((spread_clv > 0).mean()), 3),
             "spread_same_as_close": round(float((spread_clv == 0).mean()), 3),
             "total_avg_points": round(float(total_clv.mean()), 3),

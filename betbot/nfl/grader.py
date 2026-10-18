@@ -29,14 +29,38 @@ def _closing_prop(conn, p):
     return ours[0], ours[1], no_vig(ours[1], other)[0]
 
 
+def _played(conn, player_id, game_id):
+    try:
+        return conn.execute("SELECT 1 FROM nfl_snap_counts s JOIN nfl_players p ON p.pfr_id = s.pfr_player_id"
+                            " WHERE p.gsis_id = ? AND s.game_id = ? AND (s.offense_snaps > 0 OR s.st_snaps > 0)",
+                            (player_id, game_id)).fetchone() is not None
+    except Exception:  # snap counts not loaded
+        return False
+
+
+def _clv_points(p, closing_line):
+    """How many points (or yards) better our line was than the close, from our side; None for moneylines."""
+    if closing_line is None or p["line"] is None:
+        return None
+    if p["side"] in ("Over", "over"):
+        return closing_line - p["line"]
+    if p["side"] in ("Under", "under"):
+        return p["line"] - closing_line
+    return p["line"] - closing_line  # spread from our side: +7 when it closed +6 is a point better
+
+
 def grade_prop(conn, p):
     stat = MARKETS[p["market"]][0]
     row = conn.execute(f'SELECT "{stat}" FROM nfl_player_weeks WHERE player_id = ? AND game_id = ?',
                        (p["player_id"], p["game_id"])).fetchone()
     if row is None:
         posted = conn.execute("SELECT 1 FROM nfl_player_weeks WHERE game_id = ? LIMIT 1", (p["game_id"],)).fetchone()
-        # stats for the game are out but he isn't in them: he didn't play, which books usually void
-        return {"actual": None, "result": "void"} if posted else None
+        if not posted:
+            return None
+        # nflverse leaves out players who played but recorded nothing; snap counts show who actually played
+        if not _played(conn, p["player_id"], p["game_id"]):
+            return {"actual": None, "result": "void"}  # didn't play: books void the bet
+        row = (0,)
     actual = row[0] or 0
     diff = actual - p["line"] if p["side"] == "Over" else p["line"] - actual
     graded = {"actual": actual, "result": _outcome(diff)}
@@ -104,8 +128,11 @@ def grade(conn, now=None):
         graded = grade_prop(conn, p) if p["kind"] == "prop" else grade_game(conn, p, g)
         if graded is None:
             continue  # stats not posted yet
-        if graded.get("closing_implied") is not None:
-            graded["clv"] = graded["closing_implied"] - p["implied_prob"]
+        if "closing_line" in graded:
+            graded["clv_points"] = _clv_points(p, graded["closing_line"])
+            # the no-vig probabilities are only comparable at the same line
+            if graded.get("closing_implied") is not None and graded["closing_line"] == p["line"]:
+                graded["clv"] = graded["closing_implied"] - p["implied_prob"]
         graded["graded_at"] = now
         with conn:
             conn.execute(f"UPDATE predictions SET {', '.join(k + ' = ?' for k in graded)} WHERE id = ?",

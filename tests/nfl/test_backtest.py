@@ -57,3 +57,15 @@ def test_moneyline_consistent_with_spread():
     # more likely to cover +3 than to win outright, always
     for q in (0.4, 0.5, 0.6):
         assert game_model.p_home_wins_from_spread(q, 3.0, 13.5) < q
+
+
+def test_clv_totals_skip_games_without_totals():
+    conn = db.connect(":memory:")
+    db.save_game_line(conn, {"game_id": "a", "book": "x", "open_home_spread": -3.0, "close_home_spread": -4.5,
+                             "open_total": 44.0, "close_total": 45.0, "fetched_at": "t"})
+    db.save_game_line(conn, {"game_id": "b", "book": "x", "open_home_spread": -1.0, "close_home_spread": -1.0,
+                             "open_total": None, "close_total": None, "fetched_at": "t"})
+    g = pd.DataFrame({"game_id": ["a", "b"], "pred_margin": [8.0, 0.0], "sigma_margin": [13.5, 13.5],
+                      "pred_total": [50.0, 40.0], "sigma_total": [13.5, 13.5]})
+    clv = backtest.game_clv(conn, g)
+    assert clv["n"] == 2 and clv["total_n"] == 1 and clv["total_avg_points"] == 1.0

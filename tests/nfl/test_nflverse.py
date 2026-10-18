@@ -34,7 +34,7 @@ def _fake_downloads(monkeypatch, files):
     files.setdefault(nflverse.GAMES_URL, (["game_id"], [["g"]]))
     files.setdefault(nflverse.INJURIES_URL.format(2026), (["season", "gsis_id"], []))
     files.setdefault(nflverse.PLAYERS_URL, (["gsis_id"], [["00-1"]]))
-    monkeypatch.setattr(nflverse, "_csv", lambda url: files[url])  # any other URL would KeyError
+    monkeypatch.setattr(nflverse, "_csv", lambda url, optional=False: files[url])  # any other URL would KeyError
     monkeypatch.setattr(nflverse, "current_season", lambda: 2026)
     return nflverse
 
@@ -93,3 +93,18 @@ def test_incremental_load_adds_new_columns(monkeypatch):
     nflverse.load(conn)
     assert conn.execute("SELECT season, gsis_id, season_type FROM nfl_injury_reports ORDER BY season").fetchall() == [
         (2009, "x", None), (2026, "y", "REG")]
+
+
+def test_unpublished_injury_file_does_not_block_the_update(monkeypatch):
+    conn = db.connect(":memory:")
+    replace_table(conn, "nfl_player_weeks", ["season", "game_id"], [[1999, "old"]])
+    replace_table(conn, "nfl_snap_counts", ["season", "game_id"], [[2013, "s"]])
+    replace_table(conn, "nfl_injury_reports", ["season", "gsis_id"], [[2009, "x"]])
+    base = "https://github.com/nflverse/nflverse-data/releases/download/"
+    files = {base + "stats_player/stats_player_week_2026.csv": (["season", "game_id"], [[2026, "new"]]),
+             base + "snap_counts/snap_counts_2026.csv": (["season", "game_id"], [])}
+    nflverse = _fake_downloads(monkeypatch, files)
+    files[nflverse.INJURIES_URL.format(2026)] = ([], [])  # preseason: not published yet (404)
+    nflverse.load(conn)
+    assert conn.execute("SELECT count(*) FROM nfl_player_weeks WHERE season = 2026").fetchone() == (1,)
+    assert conn.execute("SELECT gsis_id FROM nfl_injury_reports").fetchall() == [("x",)]  # kept as is

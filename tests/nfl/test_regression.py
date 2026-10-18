@@ -35,7 +35,7 @@ def make_db(weeks, lines):
 def no_model(monkeypatch):
     """The model needs a full database; these tests cover the prop plumbing, test_model.py covers the model."""
     calls = []
-    monkeypatch.setattr(regression, "_add_probabilities", lambda conn, stat, pos, results, up: calls.append(up))
+    monkeypatch.setattr(regression, "_add_probabilities", lambda conn, stat, pos, results, up, shared=None: calls.append(up))
     return calls
 
 
@@ -113,7 +113,7 @@ def test_book_prices_and_game_matched(no_model):
 def test_add_probabilities_attaches_p_over(monkeypatch):
     params = {"z_quantiles": list(np.linspace(-3, 3, 401))}
     monkeypatch.setattr(model, "fitted", lambda conn, stat, pos: params)
-    monkeypatch.setattr(model, "features", lambda conn, stat, pos, up: up.assign(y=np.nan))
+    monkeypatch.setattr(model, "features", lambda conn, stat, pos, up, **kw: up.assign(y=np.nan))
     monkeypatch.setattr(model, "predict", lambda df, p: df.assign(mu=250.0, sigma=25.0))
     results = [{"player_id": "q", "game_id": "g", "line": 250.5}, {"player_id": "x", "game_id": None, "line": 1}]
     REAL_ADD(None, "passing_yards", ("QB",), results, pd.DataFrame([{"player_id": "q", "game_id": "g"}]))

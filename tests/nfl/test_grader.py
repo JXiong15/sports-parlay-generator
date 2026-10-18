@@ -37,9 +37,10 @@ def test_prop_logged_once_and_graded_with_closing_value():
     assert predictions.log_props(conn, [prop(p_over=0.65)]) == 0  # same pick, same line: first one kept
     assert row(conn, "side, model_prob, implied_prob, vig_removed") == [("Over", 0.6, 0.5, 1)]
     assert grader.grade(conn) == 1
-    (actual, result, cl, cp, clv), = row(conn, "actual, result, closing_line, closing_price, round(clv, 4)")
+    (actual, result, cl, cp, clv, pts), = row(conn, "actual, result, closing_line, closing_price, clv, clv_points")
     assert (actual, result, cl, cp) == (251, "win", 248.5, -115)
-    assert clv > 0  # the Over got more expensive by kickoff: we beat the close
+    # the line moved 245.5 -> 248.5: we beat the close by 3 yards; probabilities at different lines aren't compared
+    assert pts == 3.0 and clv is None
     assert grader.grade(conn) == 0  # already graded
 
 
@@ -52,7 +53,36 @@ def test_under_pick_dnp_void_and_unplayed_game():
     other = dict(prop(), player_id="backup", player="Back Up")
     predictions.log_props(conn, [other])
     grader.grade(conn)
-    assert row(conn, "result") == [("void",)]  # the game's stats are out and he isn't in them
+    assert row(conn, "result") == [("void",)]  # stats are out, he isn't in them, and he took no snaps
+
+
+def test_played_with_zero_stats_is_a_loss_not_a_void():
+    conn = make_db()
+    replace_table(conn, "nfl_players", ["gsis_id", "pfr_id"], [["wr", "PfrWr"]])
+    replace_table(conn, "nfl_snap_counts", ["game_id", "pfr_player_id", "offense_snaps", "st_snaps"],
+                  [["g1", "PfrWr", 22, 0]])
+    predictions.log_props(conn, [dict(prop(), player_id="wr", player="W R", line=35.5)])
+    grader.grade(conn)
+    assert row(conn, "actual, result") == [(0, "loss")]  # played 22 snaps, caught nothing: a real loss
+
+
+def test_side_flip_or_line_move_is_not_a_second_pick():
+    conn = make_db()
+    assert predictions.log_props(conn, [prop(p_over=0.51)]) == 1
+    assert predictions.log_props(conn, [prop(p_over=0.49)]) == 0  # now favors the Under: same prop, not a new bet
+    assert predictions.log_props(conn, [prop(line=248.5)]) == 0   # line moved: same prop
+    assert row(conn, "side, line") == [("Over", 245.5)]
+
+
+def test_probability_clv_at_the_same_line():
+    conn = make_db()
+    db.save_lines(conn, [dict(event_id="e1", market="player_pass_yds", player="Q B", side=s, line=248.5, price=pr,
+                              book="draftkings", book_updated_at="2026-10-18T16:45:00+00:00",
+                              fetched_at="2026-10-18T16:45:00+00:00") for s, pr in (("Over", -110), ("Under", -110))])
+    predictions.log_props(conn, [dict(prop(), line=248.5, over_price=100, under_price=-120)])
+    grader.grade(conn)
+    (clv, pts), = row(conn, "round(clv, 4), clv_points")
+    assert pts == 0 and clv > 0  # bought the Over at +100, closed -110: same line, better price
 
 
 def test_game_picks_spread_total_moneyline():
