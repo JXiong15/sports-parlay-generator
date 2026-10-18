@@ -111,3 +111,23 @@ def test_hours_since_pull():
     assert db.hours_since_pull(conn, "game_odds", "", now) == 1.5
     assert db.hours_since_pull(conn, "player_pass_yds", "e1", now) == 24
     assert db.hours_since_pull(conn, "player_pass_yds", "e2", now) is None
+
+
+def test_line_the_book_took_down_drops_out():
+    from betbot.nfl.signals.regression import current_lines
+    conn = db.connect(":memory:")
+    db.save_event(conn, dict(EVENT, commence_time="2026-10-19T17:00:00Z"))
+    first = parse_props(ODDS, "2026-10-17T20:01:00+00:00")
+    db.save_lines(conn, first)
+    db.mark_seen(conn, "lines", first, "2026-10-17T20:01:00+00:00")
+    db.record_pull(conn, "pitcher_strikeouts", "e1", "2026-10-17T20:01:00+00:00")
+    assert len(current_lines(conn, "pitcher_strikeouts", "2026-10-18T00:00:00Z")) == 1
+    # next pull: same price (nothing new saved) but still listed -> still current
+    again = [dict(r, fetched_at="2026-10-17T22:00:00+00:00") for r in first]
+    db.save_lines(conn, again)
+    db.mark_seen(conn, "lines", again, "2026-10-17T22:00:00+00:00")
+    db.record_pull(conn, "pitcher_strikeouts", "e1", "2026-10-17T22:00:00+00:00")
+    assert len(current_lines(conn, "pitcher_strikeouts", "2026-10-18T00:00:00Z")) == 1
+    # a later pull no longer lists it: gone
+    db.record_pull(conn, "pitcher_strikeouts", "e1", "2026-10-18T00:30:00+00:00")
+    assert current_lines(conn, "pitcher_strikeouts", "2026-10-18T01:00:00Z") == {}

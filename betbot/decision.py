@@ -39,11 +39,11 @@ def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, l
     if ev < MIN_EV or edge < MIN_EDGE:
         out["reasons"].append(f"no clear edge (EV {ev:+.1%}, edge {edge:+.1%} vs. book's no-vig {fair:.1%})")
         return out
-    sharp_us = sharp_them = public_on_us = public_on_them = False
+    sharp_us = sharp_them = public_on_them = False
     if bets_pct is not None and money_pct is not None:
         sharp_us = money_pct - bets_pct >= SHARP_GAP
         sharp_them = (100 - money_pct) - (100 - bets_pct) >= SHARP_GAP
-        public_on_us, public_on_them = bets_pct >= PUBLIC_HEAVY, 100 - bets_pct >= PUBLIC_HEAVY
+        public_on_them = 100 - bets_pct >= PUBLIC_HEAVY
         if sharp_them:
             out["reasons"].append(f"sharp money on the other side ({100 - money_pct:.0f}% of money vs."
                                   f" {100 - bets_pct:.0f}% of bets)")

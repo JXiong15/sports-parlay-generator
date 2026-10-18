@@ -25,6 +25,10 @@ def test_is_stale():
     replace_table(conn, "nfl_snap_counts", ["game_id"], [])
     assert is_stale(conn, "2026-10-17")  # player ID table never loaded
     replace_table(conn, "nfl_players", ["gsis_id"], [])
+    assert is_stale(conn, "2026-10-17")  # injury history never loaded
+    replace_table(conn, "nfl_injury_reports", ["gsis_id"], [])
+    assert is_stale(conn, "2026-10-17")  # g1 has stats but no snap counts yet
+    replace_table(conn, "nfl_snap_counts", ["game_id"], [["g1"]])
     assert not is_stale(conn, "2026-10-17")  # g2 is too recent to expect stats
     assert is_stale(conn, "2026-10-19")  # g2 should have stats by now
 

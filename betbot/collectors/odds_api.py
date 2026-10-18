@@ -37,6 +37,11 @@ def get_game_odds(api_key, sport, markets="h2h,spreads,totals", regions="us"):
     )
 
 
+def game_odds_kind(sport):
+    """odds_pulls key for a sport's game-odds request (one request covers every game of that sport)."""
+    return f"game_odds:{sport}"
+
+
 def parse_game_odds(events, fetched_at):
     """side is the team name for moneyline/spread and Over/Under for totals; line is empty for moneylines."""
     rows = []

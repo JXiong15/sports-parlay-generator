@@ -26,6 +26,8 @@ def collect():
     api_key = os.environ["ODDS_API_KEY"]
     sport = os.getenv("SPORT", "americanfootball_nfl")
     market = os.getenv("MARKET", "player_pass_yds")
+    if "," in market:
+        raise SystemExit("MARKET takes one prop market per run (pulls are tracked per market)")
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
     if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
         print("NFL stats are out of date, updating...")
@@ -52,15 +54,18 @@ def collect():
     fresh = lambda kind, event_id: (lambda h: h is not None and h < refresh_hours)(
         db.hours_since_pull(conn, kind, event_id, now))
 
-    if fresh("game_odds", ""):
+    game_kind = odds_api.game_odds_kind(sport)  # per sport, so an MLB run doesn't count as an NFL pull
+    if fresh(game_kind, ""):
         print(f"game odds: pulled less than {refresh_hours:g}h ago, skipped (0 credits)")
     else:
         games, remaining = odds_api.get_game_odds(api_key, sport)
         with conn:
             for event in games:
                 db.save_event(conn, event)
-            changed = db.save_game_odds(conn, odds_api.parse_game_odds(games, fetched_at))
-            db.record_pull(conn, "game_odds", "", fetched_at)
+            rows = odds_api.parse_game_odds(games, fetched_at)
+            changed = db.save_game_odds(conn, rows)
+            db.mark_seen(conn, "game_odds", rows, fetched_at)
+            db.record_pull(conn, game_kind, "", fetched_at)
         print(f"game odds: {changed} prices changed across {len(games)} games (3 credits)")
 
     # skip live games and anything beyond 24h: each event costs a credit
@@ -75,7 +80,9 @@ def collect():
         odds, remaining = odds_api.get_event_odds(api_key, sport, event["id"], market)
         with conn:
             db.save_event(conn, event)
-            changed = db.save_lines(conn, odds_api.parse_props(odds, fetched_at))
+            rows = odds_api.parse_props(odds, fetched_at)
+            changed = db.save_lines(conn, rows)
+            db.mark_seen(conn, "lines", rows, fetched_at)
             db.record_pull(conn, market, event["id"], fetched_at)
         print(f"{event['away_team']} @ {event['home_team']}: {changed} lines changed (1 credit)")
     if skipped:
@@ -83,10 +90,10 @@ def collect():
     print(f"credits remaining: {remaining if remaining is not None else 'unchanged (no paid requests)'}")
 
     if sport == "americanfootball_nfl":
+        print(f"graded: {grader.grade(conn)} finished picks")  # first: doesn't depend on the board
         picks = board.build(conn)
         props_logged, games_logged = board.log(conn, picks)
         print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
-        print(f"graded: {grader.grade(conn)} finished picks")
         board.print_board(picks)
         parlays.print_parlays(*parlays.build(conn, picks))
 

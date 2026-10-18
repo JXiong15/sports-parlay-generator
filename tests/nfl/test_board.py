@@ -22,3 +22,21 @@ def test_prop_splits_match_names_loosely():
                           "under_bets": 25}])
     assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 70.5) == (75, 60)
     assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 71.5) is None
+
+
+def test_other_side_price_only_at_the_matching_line():
+    assert board._matching_other_price("spread", (-3.0, -110), (3.0, -110)) == -110
+    assert board._matching_other_price("spread", (-3.0, -110), (3.5, -120)) is None
+    assert board._matching_other_price("total", (47.5, -110), (48.0, -120)) is None
+    assert board._matching_other_price("moneyline", (None, -150), (None, 130)) == 130
+
+
+def test_a_book_missing_one_side_is_skipped():
+    conn = db.connect(":memory:")
+    db.save_event(conn, {"id": "e1", "sport_key": "americanfootball_nfl", "commence_time": "2099-01-01T00:00:00Z"})
+    row = lambda side, line, price, book: {"event_id": "e1", "market": "spreads", "side": side, "line": line,
+                                           "price": price, "book": book, "book_updated_at": "t", "fetched_at": "t"}
+    db.save_game_odds(conn, [row("Green Bay Packers", -3, -110, "draftkings"),          # DraftKings: one side only
+                             row("Green Bay Packers", -3, -112, "fanduel"), row("Dallas Cowboys", 3, -108, "fanduel")])
+    book, sides = board._game_offers(conn, "e1")["spreads"]
+    assert book == "fanduel" and set(sides) == {"Green Bay Packers", "Dallas Cowboys"}

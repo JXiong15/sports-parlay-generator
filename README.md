@@ -7,7 +7,7 @@ It is a decision aid, not a "sure thing" generator. No bet is guaranteed. Bet on
 
 ## What one run does
 
-`python3 -m betbot.main` (NFL by default):
+`.venv/bin/python -m betbot.main` (NFL by default):
 
 1. **Updates NFL stats** if games have been played since your last update (only the current season is re-downloaded).
 2. **Gets each game's opening and current line and prices** (total, spread, moneyline) from ESPN and prints how
@@ -137,14 +137,18 @@ Opening lines from ESPN exist from 2024 on. Older seasons only have closing line
 
 ## Setup
 
-Needs Python 3 (3.11+ recommended; the code also runs on 3.9).
+Needs **Python 3.12 or newer** (on a Mac: `brew install python`). Then, once per clone:
 
 ```
-pip3 install -r requirements.txt
-cp .env.example .env
+./setup.sh
 ```
 
-Put your Odds API key in `.env` after `ODDS_API_KEY=` (no quotes). Never commit `.env`; it's already in `.gitignore`.
+It creates a project-only Python environment (`.venv`, ignored by git) with the exact library versions the tests
+passed with (`requirements.txt`), and copies `.env.example` to `.env`. Put your Odds API key in `.env` after
+`ODDS_API_KEY=` (no quotes). Never commit `.env`; it's already in `.gitignore`.
+
+Run everything with the project's Python, `.venv/bin/python`, so other Python installs on the machine don't matter.
+(Or run `source .venv/bin/activate` once per terminal, then plain `python` works.)
 
 Optional settings in `.env`:
 
@@ -158,22 +162,22 @@ Optional settings in `.env`:
 ## Commands
 
 ```
-python3 -m betbot.main                         # full run (uses Odds API credits)
-python3 -m betbot.nfl.signals.regression       # show picks from saved data (free)
-python3 -m betbot.nfl.collectors.nflverse      # update NFL stats (free; main does this automatically)
-python3 -m betbot.nfl.collectors.nflverse 1999 # full reload of every season
-python3 -m betbot.nfl.collectors.espn 2024     # one-time backfill of past opening/closing lines
-python3 -m betbot.collectors.action_network    # show current betting % (free)
-python3 -m betbot.collectors.dk_network nfl --all  # save every DraftKings prop-split article still online (free)
-python3 -m betbot.nfl.prop_splits              # saved prop splits as a table, by season and week (free)
-python3 -m betbot.nfl.collectors.weather       # this week's kickoff forecasts (free)
-python3 -m betbot.nfl.collectors.kalshi        # Kalshi prediction-market prices (free)
-python3 -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
-python3 -m betbot.nfl.board                    # this week's verdicts from saved data (free)
-python3 -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
-python3 -m betbot.nfl.grader                   # grade finished picks (free)
-python3 -m betbot.nfl.backtest                 # hit rate, calibration, Brier, CLV on past games (free)
-python3 -m pytest                              # tests (fake data, no internet, no credits)
+.venv/bin/python -m betbot.main                         # full run (uses Odds API credits)
+.venv/bin/python -m betbot.nfl.signals.regression       # show picks from saved data (free)
+.venv/bin/python -m betbot.nfl.collectors.nflverse      # update NFL stats (free; main does this automatically)
+.venv/bin/python -m betbot.nfl.collectors.nflverse 1999 # full reload of every season
+.venv/bin/python -m betbot.nfl.collectors.espn 2024     # one-time backfill of past opening/closing lines
+.venv/bin/python -m betbot.collectors.action_network    # show current betting % (free)
+.venv/bin/python -m betbot.collectors.dk_network nfl --all  # save every DraftKings prop-split article still online (free)
+.venv/bin/python -m betbot.nfl.prop_splits              # saved prop splits as a table, by season and week (free)
+.venv/bin/python -m betbot.nfl.collectors.weather       # this week's kickoff forecasts (free)
+.venv/bin/python -m betbot.nfl.collectors.kalshi        # Kalshi prediction-market prices (free)
+.venv/bin/python -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
+.venv/bin/python -m betbot.nfl.board                    # this week's verdicts from saved data (free)
+.venv/bin/python -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
+.venv/bin/python -m betbot.nfl.grader                   # grade finished picks (free)
+.venv/bin/python -m betbot.nfl.backtest                 # hit rate, calibration, Brier, CLV on past games (free)
+.venv/bin/python -m pytest                              # tests (fake data, no internet, no credits)
 ```
 
 ## API credits

@@ -1,6 +1,7 @@
 """Grades logged NFL picks once the game is played: the actual result, and the closing line and price
 (closing line value = how the no-vig probability of our side moved by kickoff; positive means we beat the close)."""
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 from betbot import db
@@ -30,12 +31,19 @@ def _closing_prop(conn, p):
 
 
 def _played(conn, player_id, game_id):
+    """True / False from snap counts, or None when they can't tell yet (not posted for this game, or the player
+    has no ID link to them): then the pick waits instead of being voided for good."""
     try:
+        if not conn.execute("SELECT 1 FROM nfl_snap_counts WHERE game_id = ? LIMIT 1", (game_id,)).fetchone():
+            return None
+        if not conn.execute("SELECT 1 FROM nfl_players WHERE gsis_id = ? AND pfr_id IS NOT NULL",
+                            (player_id,)).fetchone():
+            return None
         return conn.execute("SELECT 1 FROM nfl_snap_counts s JOIN nfl_players p ON p.pfr_id = s.pfr_player_id"
                             " WHERE p.gsis_id = ? AND s.game_id = ? AND (s.offense_snaps > 0 OR s.st_snaps > 0)",
                             (player_id, game_id)).fetchone() is not None
-    except Exception:  # snap counts not loaded
-        return False
+    except sqlite3.OperationalError:  # snap counts not loaded
+        return None
 
 
 def _clv_points(p, closing_line):
@@ -49,7 +57,7 @@ def _clv_points(p, closing_line):
     return p["line"] - closing_line  # spread from our side: +7 when it closed +6 is a point better
 
 
-def grade_prop(conn, p):
+def grade_prop(conn, p, now=None):
     stat = MARKETS[p["market"]][0]
     row = conn.execute(f'SELECT "{stat}" FROM nfl_player_weeks WHERE player_id = ? AND game_id = ?',
                        (p["player_id"], p["game_id"])).fetchone()
@@ -58,7 +66,15 @@ def grade_prop(conn, p):
         if not posted:
             return None
         # nflverse leaves out players who played but recorded nothing; snap counts show who actually played
-        if not _played(conn, p["player_id"], p["game_id"]):
+        played = _played(conn, p["player_id"], p["game_id"])
+        if played is None:
+            old = conn.execute("SELECT julianday(?) - julianday(gameday) > 7 FROM nfl_games WHERE game_id = ?",
+                               (now or datetime.now(timezone.utc).isoformat(), p["game_id"])).fetchone()
+            if not (old and old[0]):
+                return None  # can't tell yet: grade on a later run
+            # a week on and still no way to tell whether he played: neither a win, a loss nor a void
+            return {"actual": None, "result": "unverified"}
+        if not played:
             return {"actual": None, "result": "void"}  # didn't play: books void the bet
         row = (0,)
     actual = row[0] or 0
@@ -75,12 +91,15 @@ def _closing_game(conn, p, g):
     l = conn.execute("SELECT close_home_spread, close_home_spread_price, close_away_spread_price, close_total,"
                      " close_over_price, close_under_price, close_home_ml, close_away_ml FROM nfl_game_lines"
                      " WHERE game_id = ?", (p["game_id"],)).fetchone()
-    if l and l[0] is not None:
-        home_spread, home_sp, away_sp, total, over_p, under_p, home_ml, away_ml = l
-    else:
-        home_spread = -g["spread_line"] if g["spread_line"] is not None else None  # nflverse: + = home favored
-        home_sp, away_sp, total = g["home_spread_odds"], g["away_spread_odds"], g["total_line"]
-        over_p, under_p, home_ml, away_ml = g["over_odds"], g["under_odds"], g["home_moneyline"], g["away_moneyline"]
+    espn = l or (None,) * 8
+    nflverse = (-g["spread_line"] if g["spread_line"] is not None else None,  # nflverse: + = home favored
+                g["home_spread_odds"], g["away_spread_odds"], g["total_line"], g["over_odds"], g["under_odds"],
+                g["home_moneyline"], g["away_moneyline"])
+    # each market from ESPN when ESPN has it (line and both prices), else from nflverse
+    pick = lambda idx: tuple(espn[i] for i in idx) if all(espn[i] is not None for i in idx) else tuple(nflverse[i] for i in idx)
+    home_spread, home_sp, away_sp = pick((0, 1, 2))
+    total, over_p, under_p = pick((3, 4, 5))
+    home_ml, away_ml = pick((6, 7))
     side, market = p["side"], p["market"]
     if market == "spread" and home_spread is not None:
         line = home_spread if side == "home" else -home_spread
@@ -125,7 +144,7 @@ def grade(conn, now=None):
         if g is None or g[1] is None:
             continue  # not played yet
         g = dict(zip(game_cols, g))
-        graded = grade_prop(conn, p) if p["kind"] == "prop" else grade_game(conn, p, g)
+        graded = grade_prop(conn, p, now) if p["kind"] == "prop" else grade_game(conn, p, g)
         if graded is None:
             continue  # stats not posted yet
         if "closing_line" in graded:

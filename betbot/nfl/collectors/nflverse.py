@@ -4,7 +4,7 @@ import io
 import os
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 import requests
 
@@ -50,6 +50,14 @@ def current_season(today=None):
 def _cols(header):
     # headers come from a downloaded file, so escape quotes rather than trust them
     return ", ".join('"' + c.replace('"', '""') + '"' for c in header)
+
+
+def _add_missing_columns(conn, table, header):
+    """A column nflverse added since the table was made: add it instead of failing the insert."""
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for col in header:
+        if col not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {_cols([col])}")
 
 
 def _insert(conn, table, header, rows):
@@ -116,13 +124,12 @@ def load(conn, first_season=None):
             if full:
                 replace_table(conn, table, table_header, rows)
             else:
-                have = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
-                for col in table_header:
-                    if col not in have:  # a new nflverse column: add it instead of failing
-                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {_cols([col])}")
+                _add_missing_columns(conn, table, table_header)
                 conn.execute(f"DELETE FROM {table} WHERE season >= ?", (start,))
                 _insert(conn, table, table_header, rows)
     views.create(conn)
+    with conn:
+        db.record_pull(conn, "nflverse_load", "", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     print(f"{len(games)} games, {len(players)} players updated")
 
 
@@ -134,10 +141,7 @@ def update_practice_reports(conn):
             replace_table(conn, "nfl_practice_reports", header, rows)
             if _first_saved_season(conn, "nfl_injury_reports") is not None:
                 # the model reads the full history table; keep its current season as fresh as this one
-                have = [r[1] for r in conn.execute("PRAGMA table_info(nfl_injury_reports)")]
-                for col in header:
-                    if col not in have:
-                        conn.execute(f"ALTER TABLE nfl_injury_reports ADD COLUMN {_cols([col])}")
+                _add_missing_columns(conn, "nfl_injury_reports", header)
                 conn.execute("DELETE FROM nfl_injury_reports WHERE season = ?", (current_season(),))
                 _insert(conn, "nfl_injury_reports", header, rows)
 
@@ -146,14 +150,18 @@ def is_stale(conn, today=None):
     """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
     today = today or date.today().isoformat()
     try:
-        for table in ("nfl_snap_counts", "nfl_players"):
+        for table in ("nfl_snap_counts", "nfl_players", "nfl_injury_reports"):
             conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
-        return conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM nfl_games"
-            " WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
-            " AND game_id NOT IN (SELECT game_id FROM nfl_player_weeks))",
-            (today, today),
-        ).fetchone()[0] == 1
+        missing_stats = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
+            " AND game_id NOT IN (SELECT game_id FROM nfl_player_weeks))", (today, today)).fetchone()[0]
+        # snap counts can post later than stats; reload for them at most once a day, in case one never posts
+        missing_snaps = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
+            " AND game_id NOT IN (SELECT game_id FROM nfl_snap_counts))", (today, today)).fetchone()[0]
+        last_load = conn.execute("SELECT max(fetched_at) FROM odds_pulls WHERE kind = 'nflverse_load'").fetchone()[0]
+        recent = last_load is not None and last_load[:10] >= today
+        return bool(missing_stats) or (bool(missing_snaps) and not recent)
     except sqlite3.OperationalError:  # history never loaded
         return True
 

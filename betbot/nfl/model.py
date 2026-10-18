@@ -161,7 +161,11 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
     flags = injury_flags(conn) if flags is None else flags
     df = df.merge(flags[["season", "week", "player_id", "questionable", "limited_practice"]], how="left",
                   on=["season", "week", "player_id"])
-    teams = team_absences(conn, flags, upcoming) if absences is None else absences
+    both_sides = None
+    if upcoming is not None and len(upcoming):
+        both_sides = pd.concat([upcoming[["season", "week", "team"]],
+                                upcoming[["season", "week", "opponent_team"]].rename(columns={"opponent_team": "team"})])
+    teams = team_absences(conn, flags, both_sides) if absences is None else absences
     df = df.merge(teams[["season", "week", "team", "qb_out"]], how="left", on=["season", "week", "team"])
     df = df.merge(teams[["season", "week", "team", "def_starters_out"]].rename(
         columns={"team": "opponent_team", "def_starters_out": "opp_def_starters_out"}),

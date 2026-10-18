@@ -119,3 +119,12 @@ def test_add_probabilities_attaches_p_over(monkeypatch):
     REAL_ADD(None, "passing_yards", ("QB",), results, pd.DataFrame([{"player_id": "q", "game_id": "g"}]))
     assert 0.4 < results[0]["p_over"] < 0.5 and results[0]["mu"] == 250.0  # line just above the expectation
     assert "p_over" not in results[1]
+
+
+def test_same_player_spelled_two_ways_is_one_prop(no_model):
+    conn = make_db(games("q", "Kenneth Walker", [240] * 20), [
+        ("e1", "Kenneth Walker III", 239.5, "draftkings", "2026-10-17T11:00:00Z"),
+        ("e1", "Kenneth Walker", 241.5, "fanduel", "2026-10-17T11:00:00Z"),
+    ])
+    results, problems = evaluate(conn, now=NOW)
+    assert len(results) == 1 and len(no_model[0]) == 1 and problems == []

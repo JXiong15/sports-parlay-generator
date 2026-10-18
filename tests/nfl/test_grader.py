@@ -2,13 +2,13 @@ from betbot import db, predictions
 from betbot.nfl import grader
 from betbot.nfl.collectors.nflverse import replace_table
 
-GAME = ["game_id", "home_team", "away_team", "home_score", "away_score", "spread_line", "total_line",
+GAME = ["game_id", "gameday", "home_team", "away_team", "home_score", "away_score", "spread_line", "total_line",
         "home_spread_odds", "away_spread_odds", "over_odds", "under_odds", "home_moneyline", "away_moneyline"]
 
 
-def make_db(home_score=27, away_score=20):
+def make_db(home_score=27, away_score=20, gameday="2099-01-01"):
     conn = db.connect(":memory:")
-    replace_table(conn, "nfl_games", GAME, [["g1", "GB", "CHI", home_score, away_score, 3.0, 44.5,
+    replace_table(conn, "nfl_games", GAME, [["g1", gameday, "GB", "CHI", home_score, away_score, 3.0, 44.5,
                                              -110, -110, -105, -115, -160, 135]])
     replace_table(conn, "nfl_player_weeks", ["player_id", "game_id", "passing_yards"], [["qb", "g1", 251]])
     db.save_event(conn, {"id": "e1", "sport_key": "americanfootball_nfl", "commence_time": "2026-10-18T17:00:00Z"})
@@ -53,7 +53,12 @@ def test_under_pick_dnp_void_and_unplayed_game():
     other = dict(prop(), player_id="backup", player="Back Up")
     predictions.log_props(conn, [other])
     grader.grade(conn)
-    assert row(conn, "result") == [("void",)]  # stats are out, he isn't in them, and he took no snaps
+    assert row(conn, "result") == [(None,)]  # snap counts not posted yet: can't tell if he played, so wait
+    replace_table(conn, "nfl_players", ["gsis_id", "pfr_id"], [["backup", "PfrBackup"], ["starter", "PfrStarter"]])
+    replace_table(conn, "nfl_snap_counts", ["game_id", "pfr_player_id", "offense_snaps", "st_snaps"],
+                  [["g1", "PfrStarter", 60, 0]])
+    grader.grade(conn)
+    assert row(conn, "result") == [("void",)]  # snaps are out and he has none: didn't play
 
 
 def test_played_with_zero_stats_is_a_loss_not_a_void():
@@ -109,3 +114,29 @@ def test_moneyline_picks_are_not_logged_twice():
             "model_prob": 0.66, "book": "x"}
     assert predictions.log_games(conn, [pick]) == 1
     assert predictions.log_games(conn, [pick]) == 0
+
+
+def test_same_prop_at_another_book_is_not_a_second_pick():
+    conn = make_db()
+    assert predictions.log_props(conn, [prop()]) == 1
+    assert predictions.log_props(conn, [dict(prop(), book="fanduel")]) == 0
+
+
+def test_closing_line_per_market_falls_back_to_nflverse():
+    conn = make_db()
+    # ESPN has the spread but no total: the total pick still gets nflverse's closing total
+    db.save_game_line(conn, {"game_id": "g1", "book": "x", "close_home_spread": -3.5, "close_home_spread_price": -110,
+                             "close_away_spread_price": -110, "fetched_at": "t"})
+    predictions.log_games(conn, [{"game_id": "g1", "market": "total", "side": "over", "line": 44.0, "price": -110,
+                                  "other_price": -110, "model_prob": 0.55, "book": "x"}])
+    grader.grade(conn)
+    assert row(conn, "closing_line, clv_points") == [(44.5, 0.5)]
+
+
+def test_unverifiable_pick_is_marked_unverified_once_the_game_is_a_week_old():
+    conn = make_db(gameday="2026-10-01")  # no snap counts to check whether he played
+    predictions.log_props(conn, [dict(prop(), player_id="rookie", player="R Ookie")])
+    grader.grade(conn, now="2026-10-05T00:00:00+00:00")
+    assert row(conn, "result") == [(None,)]  # 4 days on: still waiting (the grader's clock, not the wall clock)
+    grader.grade(conn, now="2026-10-20T00:00:00+00:00")
+    assert row(conn, "result") == [("unverified",)]  # not a win, loss or void: left out of the record

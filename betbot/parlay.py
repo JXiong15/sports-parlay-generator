@@ -6,6 +6,7 @@ same-game legs' outcomes (positive = they tend to win together). The combined pr
 copula: correlated normal draws, a leg wins when its draw clears the threshold its probability implies.
 """
 from itertools import combinations
+from statistics import NormalDist
 
 import numpy as np
 
@@ -22,14 +23,24 @@ def _nearest_correlation(r):
     return fixed / np.outer(d, d)
 
 
+_DRAWS_CACHE = {}
+
+
+def _standard_draws(draws, n, seed):
+    """The same independent normal draws for every parlay of n legs: faster, and parlays compare consistently."""
+    key = (draws, n, seed)
+    if key not in _DRAWS_CACHE:
+        _DRAWS_CACHE[key] = np.random.default_rng(seed).standard_normal((draws, n))
+    return _DRAWS_CACHE[key]
+
+
 def joint_probability(probs, corr, draws=DRAWS, seed=7):
     """P(every leg wins). probs: each leg's win probability; corr: leg outcome correlation matrix."""
     probs = np.asarray(probs, dtype=float)
     corr = _nearest_correlation(np.asarray(corr, dtype=float))
-    rng = np.random.default_rng(seed)
-    z = rng.standard_normal((draws, len(probs))) @ np.linalg.cholesky(corr).T
-    # leg wins when its draw lands in the top `prob` share: thresholds by the empirical quantile of each column
-    thresholds = np.array([np.quantile(z[:, i], 1 - p) for i, p in enumerate(probs)])
+    z = _standard_draws(draws, len(probs), seed) @ np.linalg.cholesky(corr).T
+    # a leg wins when its standard-normal draw is above the point that leaves `prob` above it
+    thresholds = np.array([NormalDist().inv_cdf(1 - p) for p in probs])
     return float(np.mean(np.all(z > thresholds, axis=1)))
 
 

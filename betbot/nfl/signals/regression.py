@@ -42,15 +42,22 @@ def current_lines(conn, market, now):
         "SELECT l.player, e.home_team, e.away_team, l.book, l.side, l.line, l.price, e.id FROM lines l"
         " JOIN events e ON e.id = l.event_id"
         " WHERE l.market = ? AND l.side IN ('Over', 'Under') AND l.line IS NOT NULL AND e.commence_time > ?"
-        " AND l.book_updated_at = (SELECT max(book_updated_at) FROM lines x WHERE x.event_id = l.event_id"
-        "  AND x.market = l.market AND x.player = l.player AND x.side = l.side AND x.book = l.book)",
+        " AND l.fetched_at = (SELECT max(fetched_at) FROM lines x WHERE x.event_id = l.event_id"
+        "  AND x.market = l.market AND x.player = l.player AND x.side = l.side AND x.book = l.book)"
+        # still listed in the latest pull for this game (a line the book took down drops out)
+        " AND coalesce(l.seen_at, l.fetched_at) >= coalesce((SELECT max(fetched_at) FROM odds_pulls p"
+        "  WHERE p.kind = l.market AND p.event_id = l.event_id), '')",
         (market, now),
     ).fetchall()
-    by_prop = {}
+    by_prop, names = {}, {}
     for player, home, away, book, side, line, price, event_id in rows:
-        by_prop.setdefault((player, home, away), {}).setdefault(book, {})[side] = (line, price, event_id)
+        # books spell some names differently ('Kenneth Walker III' / 'Kenneth Walker'): one prop per player
+        key = (normalize(player), home, away)
+        by_prop.setdefault(key, {}).setdefault(book, {})[side] = (line, price, event_id)
+        names.setdefault(key, {})[book] = player
     out = {}
-    for key, books in by_prop.items():
+    for (norm, home, away), books in by_prop.items():
+        key = (norm, home, away)
         overs = {b: v["Over"][0] for b, v in books.items() if "Over" in v}
         if not overs:
             continue
@@ -59,8 +66,9 @@ def current_lines(conn, market, now):
                                                            if l == min(multimode(overs.values())))
         line, over_price, event_id = books[book]["Over"]
         under = books[book].get("Under")
-        out[key] = {"line": line, "book": book, "over_price": over_price, "event_id": event_id,
-                    "under_price": under[1] if under and under[0] == line else None}
+        out[(names[key][book], home, away)] = {"line": line, "book": book, "over_price": over_price,
+                                               "event_id": event_id,
+                                               "under_price": under[1] if under and under[0] == line else None}
     return out
 
 
@@ -91,14 +99,17 @@ def evaluate(conn, market="player_pass_yds", now=None, shared=None):
     stat, positions = MARKETS[market]
     now = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     index = player_index(conn, positions, current_season() - 1)
-    results, problems, upcoming = [], [], []
+    results, problems, upcoming, seen = [], [], [], set()
     for (player, home, away), offer in sorted(current_lines(conn, market, now).items()):
         line = offer["line"]
         ids = index.get(normalize(player), set())
         if len(ids) != 1:
             problems.append({"player": player, "reason": "no nflverse match" if not ids else f"ambiguous: {sorted(ids)}"})
             continue
-        player_id = ids.pop()
+        player_id = next(iter(ids))  # read, don't pop: the index is shared by every prop
+        if (player_id, home, away) in seen:
+            continue  # two different names that resolve to one player id: keep the first
+        seen.add((player_id, home, away))
         history = conn.execute(
             f'SELECT "{stat}", team, position_group FROM nfl_player_weeks WHERE player_id = ?'
             f" ORDER BY season DESC, week DESC LIMIT ?",
@@ -140,8 +151,8 @@ def _add_probabilities(conn, stat, positions, results, upcoming, shared=None):
     shared = shared or {}
     params = model.fitted(conn, stat, positions)
     df = model.predict(model.features(conn, stat, positions, upcoming, context=shared.get("context"),
-                                      flags=shared.get("flags")), params)
-    df = df[df["y"].isna()].set_index(["player_id", "game_id"])
+                                      flags=shared.get("flags"), absences=shared.get("absences")), params)
+    df = df[df["y"].isna()].drop_duplicates(["player_id", "game_id"]).set_index(["player_id", "game_id"])
     for r in results:
         key = (r["player_id"], r["game_id"])
         if r["game_id"] and key in df.index:

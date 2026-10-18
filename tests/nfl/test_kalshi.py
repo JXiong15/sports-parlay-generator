@@ -55,7 +55,7 @@ def make_db(rows=None, seen="2026-10-20T00:00:00+00:00", away="NE", home="CHI"):
                            "game_date": "2026-10-22", "away": away, "home": home, "yes_bid": b, "yes_ask": a,
                            "last_price": None, "volume": 1, "open_interest": 1, "close_time": None,
                            "fetched_at": "2026-10-20T00:00:00+00:00"} for t, m, sub, k, b, a in rows])
-    db.mark_kalshi_seen(conn, [r[0] for r in rows], seen)
+    db.mark_seen(conn, "kalshi_markets", [{"ticker": r[0]} for r in rows], seen)
     return conn
 
 
@@ -135,3 +135,17 @@ def test_freshness_is_measured_from_the_given_time():
     conn = make_db(seen="2026-10-20T00:00:00+00:00")
     assert kalshi.Prices(conn, "2026-10-20T06:00:00+00:00").game("2026_06_NE_CHI", "moneyline", "away", None) == 0.48
     assert kalshi.Prices(conn, "2026-10-21T06:00:00+00:00").game("2026_06_NE_CHI", "moneyline", "away", None) is None
+
+
+def test_two_strikeless_markets_for_one_team_dont_crash():
+    rows = [("G-1", "h2h", "NE", None, 0.47, 0.49), ("G-2", "h2h", "NE", None, 0.46, 0.48)]
+    assert kalshi.Prices(make_db(rows), NOW).game("2026_06_NE_CHI", "moneyline", "away", None) in (0.48, 0.47)
+
+
+def test_paging_stops_on_a_repeated_cursor(monkeypatch):
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"markets": [{"ticker": "x"}], "cursor": "same"}
+    monkeypatch.setattr(kalshi.requests, "get", lambda *a, **k: Resp())
+    monkeypatch.setattr(kalshi.time, "sleep", lambda s: None)
+    assert len(kalshi.fetch("KXNFLGAME")) == 2  # first page, then the cursor repeats: stop

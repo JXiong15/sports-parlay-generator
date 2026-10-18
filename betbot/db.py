@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded aft
     p_over REAL,                  -- props: model P(Over), whichever side was picked
     mu REAL,                      -- model's expected stat / margin / total
     actual REAL,                  -- filled by the grader
-    result TEXT,                  -- win / loss / push / void
+    result TEXT,                  -- win / loss / push / void / unverified (no way to tell if he played)
     closing_line REAL,
     closing_price INTEGER,
     closing_implied REAL,         -- no-vig probability of our side at the close
@@ -202,6 +202,9 @@ CREATE TABLE IF NOT EXISTS kalshi_markets (  -- Kalshi prediction-market prices,
     UNIQUE (ticker, fetched_at)
 );
 CREATE INDEX IF NOT EXISTS kalshi_lookup ON kalshi_markets (market, away, home, game_date);
+CREATE INDEX IF NOT EXISTS kalshi_ticker ON kalshi_markets (ticker, fetched_at);
+CREATE INDEX IF NOT EXISTS game_odds_latest ON game_odds (event_id, market, side, book, fetched_at);
+CREATE INDEX IF NOT EXISTS lines_latest ON lines (event_id, market, player, side, book, fetched_at);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -213,6 +216,8 @@ MIGRATIONS = {
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
     "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
     "kalshi_markets": ["seen_at TEXT"],  # last run that saw this price still listed
+    "lines": ["seen_at TEXT"],           # last Odds API pull that still listed this line
+    "game_odds": ["seen_at TEXT"],
 }
 
 
@@ -332,11 +337,11 @@ PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "playe
 
 
 def save_predictions(conn, rows):
-    """Keeps the first logging of each prop or game market (same game, player, market and book), compared with IS so
-    empty values still match."""
+    """Keeps the first logging of each prop or game market (same game, player and market, whichever book), compared
+    with IS so empty values still match."""
     cols = ", ".join(PREDICTION_COLUMNS)
     # one pick per prop or game market: a later run whose favored side or line changed isn't a second bet
-    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market", "book"))
+    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market"))
     cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
                            f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
                            f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
@@ -360,8 +365,17 @@ def save_kalshi(conn, rows):
     return cur.rowcount
 
 
-def mark_kalshi_seen(conn, tickers, seen_at):
-    """Stamps each ticker's newest row as still listed in this run, so lookups can ignore markets that vanished."""
-    conn.executemany("UPDATE kalshi_markets SET seen_at = ? WHERE ticker = ? AND fetched_at ="
-                     " (SELECT max(fetched_at) FROM kalshi_markets WHERE ticker = ?)",
-                     [(seen_at, t, t) for t in tickers])
+
+
+SEEN_KEYS = {"lines": ("event_id", "market", "player", "side", "book"),
+             "game_odds": ("event_id", "market", "side", "book"), "kalshi_markets": ("ticker",)}
+
+
+def mark_seen(conn, table, rows, seen_at):
+    """Stamps the newest saved row of each line / market in this pull. Only changes are saved, so without this a
+    line the book took down would look the same as one whose price didn't move."""
+    keys = SEEN_KEYS[table]
+    match = " AND ".join(f"{k} = :{k}" for k in keys)
+    conn.executemany(f"UPDATE {table} SET seen_at = :seen_at WHERE {match} AND fetched_at ="
+                     f" (SELECT max(fetched_at) FROM {table} WHERE {match})",
+                     [dict({k: r[k] for k in keys}, seen_at=seen_at) for r in rows])

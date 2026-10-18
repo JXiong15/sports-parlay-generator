@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from statistics import multimode
 
 from betbot import db, decision, predictions
+from betbot.collectors import odds_api
 from betbot.names import normalize
 from betbot.nfl import game_model, model
 from betbot.nfl.collectors import kalshi
@@ -42,12 +43,22 @@ def _prop_first_line(conn, r):
     return row[0] if row else None
 
 
+def _upcoming_team_weeks(conn, now):
+    """season, week, team for both teams of every upcoming game, so missing starters count on both sides."""
+    import pandas as pd
+    rows = conn.execute("SELECT season, week, home_team, away_team FROM nfl_games"
+                        " WHERE gameday >= date(?, '-1 day') AND home_score IS NULL", (now[:10],)).fetchall()
+    return pd.DataFrame([(s, w, t) for s, w, h, a in rows for t in (h, a)], columns=["season", "week", "team"])
+
+
 def prop_picks(conn, now=None, prices=None):
     """regression.evaluate for every market with lines, probabilities recalibrated on real sportsbook lines."""
     now = now or _now()
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
-    shared = {"context": model.game_context(conn), "flags": model.injury_flags(conn)}  # same for every market
+    flags = model.injury_flags(conn)
+    shared = {"context": model.game_context(conn), "flags": flags,  # same for every market: built once
+              "absences": model.team_absences(conn, flags, _upcoming_team_weeks(conn, now))}
     prices = prices or kalshi.Prices(conn, now)
     out = []
     for market in markets:
@@ -100,12 +111,18 @@ def _game_offers(conn, event_id):
     rows = conn.execute(
         "SELECT o.market, o.side, o.line, o.price, o.book FROM game_odds o WHERE o.event_id = ?"
         " AND o.fetched_at = (SELECT max(fetched_at) FROM game_odds x WHERE x.event_id = o.event_id"
-        "  AND x.market = o.market AND x.side = o.side AND x.book = o.book)", (event_id,)).fetchall()
+        "  AND x.market = o.market AND x.side = o.side AND x.book = o.book)"
+        # still listed in the latest game-odds pull (a line the book took down drops out)
+        " AND coalesce(o.seen_at, o.fetched_at) >= coalesce((SELECT max(fetched_at) FROM odds_pulls"
+        "  WHERE kind = ? AND event_id = ''), '')", (event_id, odds_api.game_odds_kind("americanfootball_nfl"))).fetchall()
     by = {}
     for market, side, line, price, book in rows:
         by.setdefault(market, {}).setdefault(book, {})[side] = (line, price)
     out = {}
     for market, books in by.items():
+        books = {b: sides for b, sides in books.items() if len(sides) == 2}  # both sides still listed
+        if not books:
+            continue
         if LINE_BOOK in books:
             out[market] = (LINE_BOOK, books[LINE_BOOK])
         else:
@@ -113,6 +130,16 @@ def _game_offers(conn, event_id):
             book = sorted(b for b, sides in books.items() if tuple(sorted(v[0] or 0 for v in sides.values())) == common)[0]
             out[market] = (book, books[book])
     return out
+
+
+def _matching_other_price(market, ours, theirs):
+    """The other side's price only when it's for the same bet (spread +3 vs -3, the same total); else None,
+    which makes the no-vig price fall back to our side's price alone."""
+    if market == "spread" and (ours[0] is None or theirs[0] is None or ours[0] != -theirs[0]):
+        return None
+    if market == "total" and ours[0] != theirs[0]:
+        return None
+    return theirs[1]
 
 
 def _game_splits(conn, home, market, side, kickoff):
@@ -182,9 +209,10 @@ def game_picks(conn, now=None, prices=None):
                 moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
             pick_line = sides[name][0] if market != "moneyline" else None
             market_prob = prices.game(game[0], market, side, pick_line)
-            d = decision.decide(prob, sides[name][1], sides[other][1], bets, money, moved, market_prob)
+            other_price = _matching_other_price(market, sides[name], sides[other])
+            d = decision.decide(prob, sides[name][1], other_price, bets, money, moved, market_prob)
             out.append({"kind": "game", "game_id": game[0], "event_id": event_id, "market": market, "side": side,
-                        "line": pick_line, "price": sides[name][1], "other_price": sides[other][1], "book": book,
+                        "line": pick_line, "price": sides[name][1], "other_price": other_price, "book": book,
                         "model_prob": round(prob, 3), "mu": float(r["pred_margin"] if market != "total" else r["pred_total"]),
                         "decision": d, "bets_pct": bets, "money_pct": money, "line_move": moved,
                         "market_prob": market_prob,

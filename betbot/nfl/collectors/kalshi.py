@@ -99,9 +99,12 @@ def fair_prob(bid, ask):
     return (bid + ask) / 2
 
 
+MAX_PAGES = 50
+
+
 def fetch(series):
-    markets, cursor = [], None
-    while True:
+    markets, cursor, seen = [], None, set()
+    for _ in range(MAX_PAGES):  # a repeated or endless cursor can't hang the run
         params = {"series_ticker": series, "status": "open", "limit": 1000}
         if cursor:
             params["cursor"] = cursor
@@ -111,8 +114,10 @@ def fetch(series):
         markets += data.get("markets", [])
         cursor = data.get("cursor")
         time.sleep(0.3)
-        if not cursor:
+        if not cursor or cursor in seen:
             return markets
+        seen.add(cursor)
+    return markets
 
 
 def update(conn):
@@ -123,7 +128,7 @@ def update(conn):
             rows = [r for r in (parse_market(m, series) for m in fetch(series)) if r]
             with conn:
                 changed += db.save_kalshi(conn, [dict(r, fetched_at=fetched_at) for r in rows])
-                db.mark_kalshi_seen(conn, [r["ticker"] for r in rows], fetched_at)
+                db.mark_seen(conn, "kalshi_markets", rows, fetched_at)
         except (requests.RequestException, ValueError, KeyError, TypeError) as e:  # Kalshi down or odd data
             print(f"  kalshi {series} skipped: {e.__class__.__name__}: {e}")
             continue
@@ -157,7 +162,7 @@ class Prices:
             d = (date.fromisoformat(day[:10]) + timedelta(days=delta)).isoformat()
             found = self.by.get((market, frozenset(teams), d), {}).get(normalize(subject))
             if found:
-                return sorted(found, key=lambda x: (x[0] is None, x[0]))
+                return sorted(found, key=lambda x: float("inf") if x[0] is None else x[0])
         return []
 
     def _game(self, game_id):
