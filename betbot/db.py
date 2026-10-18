@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS nfl_game_lines (
     current_home_spread REAL,
     close_home_spread REAL,
     fetched_at TEXT NOT NULL
+    -- price columns (American odds) are added by MIGRATIONS below
 );
 CREATE TABLE IF NOT EXISTS nfl_injuries (  -- latest ESPN report only, replaced each run
     team TEXT NOT NULL,       -- nflverse abbreviation
@@ -76,13 +77,50 @@ CREATE TABLE IF NOT EXISTS prop_splits (  -- % of handle (money) and % of bets o
     over_bets REAL,
     under_bets REAL
 );
+CREATE TABLE IF NOT EXISTS nfl_venues (  -- geocoded once per city
+    city TEXT NOT NULL,
+    state TEXT,
+    country TEXT,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS nfl_weather (  -- kickoff forecast, refreshed each run until kickoff
+    game_id TEXT PRIMARY KEY,  -- nflverse game_id
+    kickoff TEXT NOT NULL,
+    venue TEXT,
+    city TEXT,
+    state TEXT,
+    country TEXT,
+    indoor INTEGER,            -- ESPN's flag; nfl_games.roof has dome / closed / open / outdoors
+    espn_condition TEXT,
+    espn_temp_f REAL,
+    temp_f REAL,
+    wind_mph REAL,
+    gust_mph REAL,
+    precip_pct REAL,
+    fetched_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
+
+
+# columns added after a table first shipped; connect() adds any an existing database is missing
+MIGRATIONS = {
+    "nfl_game_lines": [f"{k}_{c} INTEGER" for k in ("open", "current", "close") for c in (
+        "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
+    "splits": ["price INTEGER"],  # DraftKings' American odds for that side
+}
 
 
 def connect(path):
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
+    for table, columns in MIGRATIONS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col in columns:
+            if col.split()[0] not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
+    conn.commit()
     return conn
 
 
@@ -102,12 +140,13 @@ def save_lines(conn, rows):
     return cur.rowcount
 
 
+def _upsert(conn, table, row):
+    cols = ", ".join(row)
+    conn.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({', '.join(':' + c for c in row)})", row)
+
+
 def save_game_line(conn, row):
-    conn.execute(
-        "INSERT OR REPLACE INTO nfl_game_lines VALUES (:game_id, :book, :open_total, :current_total, :close_total,"
-        " :open_home_spread, :current_home_spread, :close_home_spread, :fetched_at)",
-        row,
-    )
+    _upsert(conn, "nfl_game_lines", row)
 
 
 def replace_injuries(conn, rows):
@@ -119,8 +158,9 @@ def replace_injuries(conn, rows):
 
 def save_splits(conn, rows):
     conn.executemany(
-        "INSERT OR IGNORE INTO splits VALUES (:league, :game_id, :start_time, :home_team, :away_team, :market, :side,"
-        " :line, :bets_pct, :money_pct, :fetched_at)",
+        "INSERT OR IGNORE INTO splits (league, game_id, start_time, home_team, away_team, market, side, line, bets_pct,"
+        " money_pct, fetched_at, price) VALUES (:league, :game_id, :start_time, :home_team, :away_team, :market, :side,"
+        " :line, :bets_pct, :money_pct, :fetched_at, :price)",
         rows,
     )
 
@@ -135,3 +175,11 @@ def save_prop_splits(conn, article, rows):
         " :under_handle, :over_bets, :under_bets)",
         [dict(r, article_id=article["id"]) for r in rows],
     )
+
+
+def save_weather(conn, row):
+    # a game that has kicked off keeps its last forecast instead of being blanked
+    if row["temp_f"] is None and conn.execute("SELECT temp_f FROM nfl_weather WHERE game_id = ?",
+                                              (row["game_id"],)).fetchone():
+        return
+    _upsert(conn, "nfl_weather", row)

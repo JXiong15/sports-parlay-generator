@@ -63,13 +63,15 @@ def parse(html, league, fetched_at):
         event = markets.get(CONSENSUS_BOOK, {}).get("event", {})
         line_event = markets.get(LINE_BOOK, {}).get("event", {})
         for market in MARKETS:
-            real_lines = {o.get("side"): o.get("value") for o in line_event.get(market, [])}
+            real = {o.get("side"): o for o in line_event.get(market, [])}
             for o in event.get(market, []):
                 info = o.get("bet_info") or {}
                 rows.append({
                     "league": league, "game_id": g["id"], "start_time": g["start_time"],
                     "home_team": home, "away_team": away, "market": market, "side": o.get("side"),
-                    "line": real_lines.get(o.get("side"), o.get("value")), "bets_pct": (info.get("tickets") or {}).get("percent"),
+                    # a moneyline has no line; Action Network sends 0
+                    "line": None if market == "moneyline" else real.get(o.get("side"), o).get("value"), "price": real.get(o.get("side"), o).get("odds"),
+                    "bets_pct": (info.get("tickets") or {}).get("percent"),
                     "money_pct": (info.get("money") or {}).get("percent") if g["id"] in free_money else None,
                     "fetched_at": fetched_at,
                 })

@@ -11,7 +11,7 @@ def make_db(weeks, lines):
     conn = db.connect(":memory:")
     replace_table(conn, "nfl_player_weeks",
                   ["player_id", "player_display_name", "position_group", "season", "week", "passing_yards", "team"], weeks)
-    replace_table(conn, "nfl_snap_counts", ["game_id", "week", "player", "position", "team", "offense_pct", "defense_pct"], [])
+    replace_table(conn, "nfl_snap_counts", ["game_id", "season", "week", "player", "position", "team", "offense_pct", "defense_pct"], [])
     replace_table(conn, "nfl_practice_reports", ["season", "week", "gsis_id", "practice_status",
                                                  "practice_primary_injury", "report_primary_injury"], [])
     for event_id, start in (("e1", "2026-10-18T17:00:00Z"), ("old", "2026-10-11T17:00:00Z")):

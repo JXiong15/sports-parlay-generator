@@ -31,7 +31,8 @@ def starters(conn, team, pct_column):
     Long-term injuries drop out on their own: they have no recent snaps, and their absence is already in the baseline.
     """
     games = [g for (g,) in conn.execute(
-        "SELECT game_id FROM nfl_snap_counts WHERE team = ? GROUP BY game_id ORDER BY max(week) DESC LIMIT ?",
+        "SELECT game_id FROM nfl_snap_counts WHERE team = ? GROUP BY game_id"
+        " ORDER BY max(season) DESC, max(week) DESC LIMIT ?",
         (team, RECENT_GAMES),
     )]
     if not games:

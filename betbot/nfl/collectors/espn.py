@@ -28,6 +28,14 @@ def _num(s):
         return None
 
 
+def _price(s):
+    """American odds: '-110' -> -110, '+130' -> 130, 'EVEN' -> 100."""
+    if s is not None and str(s).lower() == "even":
+        return 100
+    n = _num(s)
+    return int(n) if n is not None else None
+
+
 def _dig(d, *keys):
     for k in keys:
         d = (d or {}).get(k)
@@ -38,14 +46,22 @@ def parse(item):
     row = {"book": item["provider"]["name"]}
     for k in ("open", "current", "close"):
         row[f"{k}_total"] = _num(_dig(item, k, "total", "american"))
+        row[f"{k}_over_price"] = _price(_dig(item, k, "over", "american"))
+        row[f"{k}_under_price"] = _price(_dig(item, k, "under", "american"))
         row[f"{k}_home_spread"] = _num(_dig(item, "homeTeamOdds", k, "pointSpread", "american"))
+        for side in ("home", "away"):
+            row[f"{k}_{side}_spread_price"] = _price(_dig(item, f"{side}TeamOdds", k, "spread", "american"))
+            row[f"{k}_{side}_ml"] = _price(_dig(item, f"{side}TeamOdds", k, "moneyLine", "american"))
     return row
 
 
 def pick(items):
-    """First pregame book that has an opening total; books often list it empty. Live (in-game) odds are skipped."""
+    """The pregame book with the most lines and prices filled in (books often leave some empty; first wins ties).
+
+    Live (in-game) odds are skipped.
+    """
     pregame = [i for i in items if "live" not in i["provider"]["name"].lower()]
-    return next((i for i in pregame if _dig(i, "open", "total", "american")), pregame[0] if pregame else None)
+    return max(pregame, key=lambda i: sum(v is not None for v in parse(i).values()), default=None)
 
 
 def update(conn, games):
@@ -103,7 +119,8 @@ def upcoming(conn, days=7):
 def unfetched_finished(conn, first_season):
     return conn.execute(
         "SELECT game_id, espn FROM nfl_games WHERE espn IS NOT NULL AND home_score IS NOT NULL AND season >= ?"
-        " AND game_id NOT IN (SELECT game_id FROM nfl_game_lines WHERE close_total IS NOT NULL)",
+        " AND game_id NOT IN (SELECT game_id FROM nfl_game_lines WHERE close_total IS NOT NULL"
+        "  AND close_home_ml IS NOT NULL)",
         (first_season,),
     ).fetchall()
 

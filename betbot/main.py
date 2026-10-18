@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from betbot import db
 from betbot.collectors import action_network, dk_network, odds_api
-from betbot.nfl.collectors import espn, nflverse
+from betbot.nfl.collectors import espn, nflverse, weather
 
 
 def print_line_moves(conn):
@@ -35,6 +35,7 @@ def collect():
         nflverse.update_practice_reports(conn)
         action_network.update(conn, "nfl")
         dk_network.update(conn, "nfl")
+        weather.update(conn)
         print_line_moves(conn)
 
     now = datetime.now(timezone.utc)

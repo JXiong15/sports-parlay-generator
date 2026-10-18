@@ -10,7 +10,8 @@ def game(gid, away_rot, money):
             "teams": [{"id": 1, "full_name": "Houston Texans"}, {"id": 2, "full_name": "Jacksonville Jaguars"}],
             "markets": {"15": {"event": {"total": [{"side": "over", "value": 42, "bet_info": side(80)},
                                                    {"side": "under", "value": 42, "bet_info": side(20)}]}},
-                        "68": {"event": {"total": [{"side": "over", "value": 41.5}, {"side": "under", "value": 41.5}]}}}}
+                        "68": {"event": {"total": [{"side": "over", "value": 41.5, "odds": -112},
+                                                   {"side": "under", "value": 41.5, "odds": -108}]}}}}
 
 
 def page(games, rows_html):
@@ -30,6 +31,7 @@ def test_money_only_where_page_shows_it():
     assert free[0]["home_team"] == "Jacksonville Jaguars" and free[0]["away_team"] == "Houston Texans"
     assert [(r["side"], r["line"], r["bets_pct"], r["money_pct"]) for r in free] == [
         ("over", 41.5, 80, 40), ("under", 41.5, 20, 40)]  # DraftKings line, not the 42 consensus
+    assert [r["price"] for r in free] == [-112, -108]
     assert all(r["bets_pct"] is not None and r["money_pct"] is None for r in locked)  # PRO data never kept
 
     conn = db.connect(":memory:")

@@ -4,12 +4,12 @@ from betbot.nfl.collectors.nflverse import replace_table
 from betbot.nfl.signals.injuries import flags, practice, starters
 
 PRACTICE_COLS = ["season", "week", "gsis_id", "practice_status", "practice_primary_injury", "report_primary_injury"]
-SNAP_COLS = ["game_id", "week", "player", "position", "team", "offense_pct", "defense_pct"]
+SNAP_COLS = ["game_id", "season", "week", "player", "position", "team", "offense_pct", "defense_pct"]
 
 
-def snaps(team, player, pos, pcts, side="offense"):
+def snaps(team, player, pos, pcts, side="offense", season=2026):
     # pcts[0] is the team's most recent game
-    return [[f"{team}{len(pcts) - i}", len(pcts) - i, player, pos, team,
+    return [[f"{team}{season}_{len(pcts) - i}", season, len(pcts) - i, player, pos, team,
              pct if side == "offense" else 0, pct if side == "defense" else 0] for i, pct in enumerate(pcts)]
 
 
@@ -65,3 +65,12 @@ def test_practice_report_catches_healthy_but_hurt():
         "Bryce Young practiced fully this week (Knee)"]
     assert practice(conn, "rester") is None and practice(conn, "nobody") is None
     assert practice(conn, "gametime") == (None, "Hamstring")
+
+
+def test_starters_last_three_games_span_seasons():
+    # last 3 team games: 2026 week 1, then 2025 weeks 18 and 17 -- not 2025's week 18 sorted above 2026's week 1
+    row = lambda season, week, player, pct: [f"GB{season}_{week}", season, week, player, "WR", "GB", pct, 0]
+    rows = [row(2026, 1, "New Starter", 0.9), row(2025, 18, "New Starter", 0.9), row(2025, 17, "New Starter", 0.9),
+            row(2026, 1, "Gone", 0.0), row(2025, 18, "Gone", 0.0), row(2025, 17, "Gone", 0.0),
+            row(2025, 16, "Gone", 0.95), row(2025, 15, "Gone", 0.95), row(2025, 14, "Gone", 0.95)]
+    assert starters(make_db(rows, []), "GB", "offense_pct") == {"new starter": "WR"}
