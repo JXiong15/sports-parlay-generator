@@ -1,6 +1,7 @@
 from betbot import db
 from betbot.collectors.nflverse import current_season, replace_table
-from betbot.signals.regression import evaluate, normalize
+from betbot.names import normalize
+from betbot.signals.regression import evaluate
 
 NOW = "2026-10-18T12:00:00Z"
 SEASON = current_season()
@@ -9,17 +10,21 @@ SEASON = current_season()
 def make_db(weeks, lines):
     conn = db.connect(":memory:")
     replace_table(conn, "nfl_player_weeks",
-                  ["player_id", "player_display_name", "position_group", "season", "week", "passing_yards"], weeks)
-    db.save_event(conn, {"id": "e1", "sport_key": "americanfootball_nfl", "commence_time": "2026-10-18T17:00:00Z"})
-    db.save_event(conn, {"id": "old", "sport_key": "americanfootball_nfl", "commence_time": "2026-10-11T17:00:00Z"})
+                  ["player_id", "player_display_name", "position_group", "season", "week", "passing_yards", "team"], weeks)
+    replace_table(conn, "nfl_snap_counts", ["game_id", "week", "player", "position", "team", "offense_pct", "defense_pct"], [])
+    replace_table(conn, "nfl_practice_reports", ["season", "week", "gsis_id", "practice_status",
+                                                 "practice_primary_injury", "report_primary_injury"], [])
+    for event_id, start in (("e1", "2026-10-18T17:00:00Z"), ("old", "2026-10-11T17:00:00Z")):
+        db.save_event(conn, {"id": event_id, "sport_key": "americanfootball_nfl", "commence_time": start,
+                             "home_team": "Green Bay Packers", "away_team": "Chicago Bears"})
     db.save_lines(conn, [dict(event_id=e, market="player_pass_yds", player=p, side="Over", line=l, price=-110,
                               book=b, book_updated_at=t, fetched_at=t) for e, p, l, b, t in lines])
     return conn
 
 
-def games(pid, name, yards, pos="QB"):
+def games(pid, name, yards, pos="QB", team="GB"):
     # yards[0] is the most recent game
-    return [[pid, name, pos, SEASON, len(yards) - i, y] for i, y in enumerate(yards)]
+    return [[pid, name, pos, SEASON, len(yards) - i, y, team] for i, y in enumerate(yards)]
 
 
 def test_normalize():
@@ -55,3 +60,9 @@ def test_unmatched_ambiguous_and_short_history_are_reported():
     reasons = {p["player"]: p["reason"] for p in problems}
     assert reasons.keys() == {"Sam Smith", "Nobody Here"}
     assert reasons["Sam Smith"].startswith("ambiguous") and reasons["Nobody Here"] == "no nflverse match"
+
+
+def test_traded_player_is_flagged():
+    conn = make_db(games("t1", "Moved Guy", [250] * 20, team="DAL"), [("e1", "Moved Guy", 250.5, "dk", "2026-10-17T11:00:00Z")])
+    results, _ = evaluate(conn, now=NOW)
+    assert "check for a trade" in results[0]["flags"][0]

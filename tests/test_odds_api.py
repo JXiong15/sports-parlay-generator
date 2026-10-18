@@ -30,3 +30,16 @@ def test_parse_and_dedupe():
     assert db.save_lines(conn, rows) == 2
     # same book snapshot polled again later: no duplicate history
     assert db.save_lines(conn, parse_props(ODDS, "2026-10-17T20:05:00Z")) == 0
+
+
+def test_errors_never_include_api_key(monkeypatch):
+    import pytest
+    import requests
+    from betbot.collectors import odds_api
+
+    def fail(url, params, timeout):
+        raise requests.ConnectionError(f"Max retries exceeded with url: {url}?apiKey={params['apiKey']}")
+    monkeypatch.setattr(odds_api.requests, "get", fail)
+    with pytest.raises(RuntimeError) as err:
+        odds_api.get_events("SECRET123", "americanfootball_nfl")
+    assert "SECRET123" not in str(err.value) and err.value.__suppress_context__

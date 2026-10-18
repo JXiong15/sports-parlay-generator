@@ -11,6 +11,8 @@ import requests
 from betbot import db
 
 GAMES_URL = "https://github.com/nflverse/nfldata/raw/master/data/games.csv"
+INJURIES_URL = "https://github.com/nflverse/nflverse-data/releases/download/injuries/injuries_{}.csv"
+SNAP_COUNTS_URL = "https://github.com/nflverse/nflverse-data/releases/download/snap_counts/snap_counts_{}.csv"
 PLAYER_WEEK_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{}.csv"
 
 
@@ -39,7 +41,8 @@ def current_season(today=None):
 
 
 def _cols(header):
-    return ", ".join(f'"{c}"' for c in header)
+    # headers come from a downloaded file, so escape quotes rather than trust them
+    return ", ".join('"' + c.replace('"', '""') + '"' for c in header)
 
 
 def _insert(conn, table, header, rows):
@@ -63,9 +66,12 @@ def load(conn, first_season=None):
         week_header, week_rows = _csv(PLAYER_WEEK_URL.format(season))
         rows += week_rows
         print(f"{season}: {len(week_rows)} player-weeks")
+    # only the latest games matter for who is starting right now
+    snap_header, snaps = _csv(SNAP_COUNTS_URL.format(current_season()))
     # one transaction so a failed download never leaves a half-empty table
     with conn:
         replace_table(conn, "nfl_games", header, games)
+        replace_table(conn, "nfl_snap_counts", snap_header, snaps)
         if has_history and first_season > 1999:
             # shortcut: assumes nflverse keeps the same columns; if this errors, run a full reload with 1999
             conn.execute("DELETE FROM nfl_player_weeks WHERE season >= ?", (first_season,))
@@ -75,10 +81,19 @@ def load(conn, first_season=None):
     print(f"{len(games)} games, {len(rows)} player-weeks updated")
 
 
+def update_practice_reports(conn):
+    """This season's official injury/practice reports; small, and they change daily during the week, so refresh every run."""
+    header, rows = _csv(INJURIES_URL.format(current_season()))
+    if rows:
+        with conn:
+            replace_table(conn, "nfl_practice_reports", header, rows)
+
+
 def is_stale(conn, today=None):
     """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
     today = today or date.today().isoformat()
     try:
+        conn.execute("SELECT 1 FROM nfl_snap_counts LIMIT 1")
         return conn.execute(
             "SELECT EXISTS (SELECT 1 FROM nfl_games"
             " WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"

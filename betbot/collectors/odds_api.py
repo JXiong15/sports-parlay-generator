@@ -4,8 +4,13 @@ BASE_URL = "https://api.the-odds-api.com/v4"
 
 
 def _get(path, params):
-    resp = requests.get(f"{BASE_URL}{path}", params=params, timeout=30)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(f"{BASE_URL}{path}", params=params, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        # requests' messages include the full URL, which carries the API key; `from None` drops that traceback too
+        status = getattr(e.response, "status_code", None)
+        raise RuntimeError(f"The Odds API request to {path} failed ({status or e.__class__.__name__})") from None
     return resp.json(), resp.headers.get("x-requests-remaining")
 
 

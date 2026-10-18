@@ -30,6 +30,8 @@ def collect():
         nflverse.load(conn)
     if sport == "americanfootball_nfl":
         espn.update(conn, espn.upcoming(conn))
+        espn.update_injuries(conn)
+        nflverse.update_practice_reports(conn)
         print_line_moves(conn)
 
     now = datetime.now(timezone.utc)

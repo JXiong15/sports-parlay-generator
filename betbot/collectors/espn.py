@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 import requests
 
 from betbot import db
+from betbot.names import TEAMS, normalize
 
+INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
 ODDS_URL = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/events/{0}/competitions/{0}/odds"
 
 
@@ -62,6 +64,31 @@ def update(conn, games):
             with conn:
                 db.save_game_line(conn, row)
         time.sleep(0.2)  # be polite to an unofficial feed
+
+
+def parse_injuries(data, fetched_at):
+    rows = []
+    for team in data.get("injuries", []):
+        abbr = TEAMS.get(team.get("displayName"))
+        if abbr is None:
+            print(f"unknown team in ESPN injuries: {team.get('displayName')!r}")
+            continue
+        for i in team.get("injuries", []):
+            name = _dig(i, "athlete", "displayName")
+            if name and i.get("status"):
+                rows.append({"team": abbr, "player": name, "name_key": normalize(name),
+                             "position": _dig(i, "athlete", "position", "abbreviation"),
+                             "status": i["status"], "fetched_at": fetched_at})
+    return rows
+
+
+def update_injuries(conn):
+    resp = requests.get(INJURIES_URL, timeout=30)
+    resp.raise_for_status()
+    rows = parse_injuries(resp.json(), datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    if rows:  # an empty or reshaped response must not wipe the last good report
+        with conn:
+            db.replace_injuries(conn, rows)
 
 
 def upcoming(conn, days=7):

@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS nfl_game_lines (
     close_home_spread REAL,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nfl_injuries (  -- latest ESPN report only, replaced each run
+    team TEXT NOT NULL,       -- nflverse abbreviation
+    player TEXT NOT NULL,
+    name_key TEXT NOT NULL,   -- names.normalize(player)
+    position TEXT,
+    status TEXT NOT NULL,     -- Out, Doubtful, Questionable, Injured Reserve, ...
+    fetched_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -64,4 +72,11 @@ def save_game_line(conn, row):
         "INSERT OR REPLACE INTO nfl_game_lines VALUES (:game_id, :book, :open_total, :current_total, :close_total,"
         " :open_home_spread, :current_home_spread, :close_home_spread, :fetched_at)",
         row,
+    )
+
+
+def replace_injuries(conn, rows):
+    conn.execute("DELETE FROM nfl_injuries")
+    conn.executemany(
+        "INSERT INTO nfl_injuries VALUES (:team, :player, :name_key, :position, :status, :fetched_at)", rows
     )
