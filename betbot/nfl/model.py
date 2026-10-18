@@ -1,0 +1,255 @@
+"""Player stat model: predicts a player's stat for a game and the probability it goes Over a line.
+
+1. Baseline: recency-weighted average of the player's previous games, pulled toward his position's average
+   from the previous season when he has few games.
+2. Context: multiplicative adjustments fitted by least squares on past seasons (not hand-picked): opponent's
+   defense vs. his position, team implied points, spread (game script), wind, cold, home, recent usage trend,
+   his injury report / practice status, his team's starting QB out, opposing defensive starters out.
+3. Probability: the empirical distribution of past standardized errors gives P(stat > line).
+
+Every feature for a game uses only games played before it, so the same code serves live predictions and
+backtests without peeking.
+"""
+import json
+import math
+from datetime import datetime, timezone
+
+import numpy as np
+import pandas as pd
+
+HALFLIFE = 6          # games; how fast older games fade from the baseline
+SHRINK_GAMES = 2      # pseudo-games of the position average added to a player's baseline
+MIN_PRIOR_GAMES = 4   # training rows need at least this many previous games
+FIRST_SEASON = 2013   # snap counts start in 2013
+
+# stat column -> (usage column whose recent trend matters, offset that keeps log ratios finite)
+STATS = {
+    "passing_yards": ("attempts", 20.0), "passing_tds": ("attempts", 0.5), "completions": ("attempts", 2.0),
+    "attempts": ("attempts", 3.0), "passing_interceptions": ("attempts", 0.5),
+    "rushing_yards": ("carries", 5.0), "carries": ("carries", 1.0), "rushing_tds": ("carries", 0.3),
+    "receptions": ("target_share", 1.0), "receiving_yards": ("target_share", 5.0),
+    "receiving_tds": ("target_share", 0.3),
+}
+FEATURES = ["def_vs_pos", "implied_points", "spread", "wind", "cold", "home", "usage_trend",
+            "questionable", "limited_practice", "qb_out", "opp_def_starters_out"]
+MISSING = ("Out", "Doubtful", "Injured Reserve")
+
+
+# ---------- data ----------
+
+def history(conn, stat, positions, first_season=FIRST_SEASON):
+    usage = STATS[stat][0]
+    return pd.read_sql_query(
+        f'SELECT player_id, player_display_name AS player, position_group, season, week, game_id, team,'
+        f' opponent_team, "{stat}" AS y, "{usage}" AS usage FROM nfl_player_weeks'
+        f" WHERE season >= ? AND position_group IN ({', '.join('?' * len(positions))})",
+        conn, params=(first_season, *positions))
+
+
+def game_context(conn):
+    """Per (game_id, team): implied points, spread from the team's side (negative = favored), home, weather."""
+    g = pd.read_sql_query(
+        "SELECT game_id, season, week, home_team, away_team, home_implied_points, away_implied_points,"
+        " home_spread, wind_mph, temp_f, roof FROM nfl_game_context", conn)
+    outdoors = g["roof"].isin(["outdoors", "open"]) | g["roof"].isna()
+    rows = []
+    for side, other in (("home", "away"), ("away", "home")):
+        rows.append(pd.DataFrame({
+            "game_id": g["game_id"], "team": g[f"{side}_team"], "home": 1 if side == "home" else 0,
+            "implied_points": g[f"{side}_implied_points"],
+            "spread": g["home_spread"] if side == "home" else -g["home_spread"],
+            "wind": np.where(outdoors, g["wind_mph"], 0.0), "temp": np.where(outdoors, g["temp_f"], 70.0)}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def injury_flags(conn):
+    """Per (season, week, gsis_id): questionable and limited-practice flags; empty if reports aren't loaded."""
+    try:
+        r = pd.read_sql_query("SELECT season, week, gsis_id AS player_id, report_status, practice_status,"
+                              " practice_primary_injury FROM nfl_injury_reports", conn)
+    except Exception:  # table not loaded yet
+        return pd.DataFrame(columns=["season", "week", "player_id", "questionable", "limited_practice", "status"])
+    injured = ~r["practice_primary_injury"].fillna("").str.startswith("Not injury related")
+    r["questionable"] = (r["report_status"] == "Questionable").astype(float)
+    r["limited_practice"] = (injured & r["practice_status"].fillna("").str.contains("Limited|Did Not", regex=True)).astype(float)
+    r["status"] = r["report_status"]
+    return r.groupby(["season", "week", "player_id"], as_index=False).agg(
+        questionable=("questionable", "max"), limited_practice=("limited_practice", "max"), status=("status", "first"))
+
+
+def team_absences(conn, flags, upcoming=None):
+    """Per (season, week, team): qb_out (last game's QB listed Out/Doubtful) and def_starters_out (players with
+    60%+ of defensive snaps over the team's previous 3 games listed Out/Doubtful)."""
+    out = flags[flags["status"].isin(MISSING)][["season", "week", "player_id"]].assign(out=1)
+    qbs = pd.read_sql_query("SELECT season, week, team, player_id, attempts FROM nfl_player_weeks"
+                            " WHERE position_group = 'QB' AND attempts > 0", conn)
+    starter = qbs.sort_values("attempts").groupby(["season", "week", "team"]).tail(1)
+    weeks = starter[["season", "week", "team"]]
+    if upcoming is not None and len(upcoming):
+        weeks = pd.concat([weeks, upcoming[["season", "week", "team"]]]).drop_duplicates()
+    weeks = weeks.sort_values(["team", "season", "week"])
+    weeks = weeks.merge(starter[["season", "week", "team", "player_id"]], how="left")
+    weeks["prior_qb"] = weeks.groupby("team")["player_id"].shift(1)
+    weeks = weeks.merge(out.rename(columns={"player_id": "prior_qb"}), how="left", on=["season", "week", "prior_qb"])
+    qb = weeks.assign(qb_out=weeks["out"].fillna(0))[["season", "week", "team", "qb_out"]]
+
+    try:
+        snaps = pd.read_sql_query(
+            "SELECT s.season, s.week, s.team, p.gsis_id AS player_id, s.defense_pct FROM nfl_snap_counts s"
+            " JOIN nfl_players p ON p.pfr_id = s.pfr_player_id WHERE s.defense_pct > 0", conn)
+    except Exception:
+        snaps = pd.DataFrame(columns=["season", "week", "team", "player_id", "defense_pct"])
+    if len(snaps):
+        snaps = snaps.sort_values(["player_id", "season", "week"])
+        snaps["recent"] = snaps.groupby("player_id")["defense_pct"].transform(lambda s: s.rolling(3, min_periods=2).mean())
+        starters = snaps[snaps["recent"] >= 0.6][["season", "week", "team", "player_id"]]
+        # a starter as of week w is listed for week w+1 (next team game)
+        team_weeks = qb[["season", "week", "team"]].sort_values(["team", "season", "week"])
+        team_weeks["next_season"] = team_weeks.groupby("team")["season"].shift(-1)
+        team_weeks["next_week"] = team_weeks.groupby("team")["week"].shift(-1)
+        starters = starters.merge(team_weeks, on=["season", "week", "team"]).dropna(subset=["next_week"])
+        starters = starters.assign(season=starters["next_season"].astype(int), week=starters["next_week"].astype(int))
+        d = starters.merge(out, on=["season", "week", "player_id"]).groupby(["season", "week", "team"]).size()
+        d = d.rename("def_starters_out").reset_index()
+    else:
+        d = pd.DataFrame(columns=["season", "week", "team", "def_starters_out"])
+    return qb.merge(d, how="left", on=["season", "week", "team"]).fillna({"def_starters_out": 0})
+
+
+# ---------- features ----------
+
+def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df=None, context=None, flags=None,
+             absences=None):
+    """History rows (y known) plus optional upcoming rows (y NaN), each with features from earlier games only.
+    upcoming: DataFrame with player_id, player, position_group, season, week, game_id, team, opponent_team."""
+    df = history(conn, stat, positions, first_season) if df is None else df.copy()
+    if upcoming is not None and len(upcoming):
+        df = pd.concat([df, upcoming.assign(y=np.nan, usage=np.nan)], ignore_index=True)
+    df = df.sort_values(["player_id", "season", "week"]).reset_index(drop=True)
+    by_player = df.groupby("player_id")
+
+    df["prior_n"] = by_player["y"].transform(lambda s: s.shift(1).notna().cumsum())
+    df["ewm"] = by_player["y"].transform(lambda s: s.shift(1).ewm(halflife=HALFLIFE, ignore_na=True).mean())
+    df["usage_recent"] = by_player["usage"].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    df["usage_ewm"] = by_player["usage"].transform(lambda s: s.shift(1).ewm(halflife=HALFLIFE, ignore_na=True).mean())
+
+    # previous season's average for the position (players with 4+ games), the shrink target
+    played = df[df["y"].notna()]
+    pos_season = played.groupby(["position_group", "season"])["y"].mean().rename("pos_mean").reset_index()
+    pos_season["season"] += 1
+    df = df.merge(pos_season, how="left", on=["position_group", "season"])
+    df["pos_mean"] = df["pos_mean"].fillna(played["y"].mean() if len(played) else 0.0)
+    n = df["prior_n"]
+    df["base"] = np.where(n > 0, (n * df["ewm"].fillna(0) + SHRINK_GAMES * df["pos_mean"]) / (n + SHRINK_GAMES),
+                          df["pos_mean"])
+
+    # what each defense allowed to this position group, over its previous 8 games, vs. the league
+    allowed = (df.groupby(["season", "week", "game_id", "opponent_team"])["y"].sum(min_count=1)
+               .rename("allowed").reset_index().sort_values(["opponent_team", "season", "week"]))
+    allowed["def_prior"] = allowed.groupby("opponent_team")["allowed"].transform(
+        lambda s: s.shift(1).rolling(8, min_periods=2).mean())
+    allowed["def_games"] = allowed.groupby("opponent_team")["allowed"].transform(lambda s: s.shift(1).notna().cumsum().clip(upper=8))
+    league = allowed.groupby(["season", "week"])["allowed"].mean().rename("league").reset_index()
+    league["league_prior"] = league["league"].shift(1).rolling(8, min_periods=1).mean()
+    allowed = allowed.merge(league[["season", "week", "league_prior"]], on=["season", "week"])
+    ratio = np.log((allowed["def_prior"] + 1) / (allowed["league_prior"] + 1))
+    allowed["def_vs_pos"] = (ratio * allowed["def_games"] / (allowed["def_games"] + 4)).fillna(0)
+    df = df.merge(allowed[["game_id", "opponent_team", "def_vs_pos"]], how="left", on=["game_id", "opponent_team"])
+
+    ctx = game_context(conn) if context is None else context
+    df = df.merge(ctx, how="left", on=["game_id", "team"])
+    flags = injury_flags(conn) if flags is None else flags
+    df = df.merge(flags[["season", "week", "player_id", "questionable", "limited_practice"]], how="left",
+                  on=["season", "week", "player_id"])
+    teams = team_absences(conn, flags, upcoming) if absences is None else absences
+    df = df.merge(teams[["season", "week", "team", "qb_out"]], how="left", on=["season", "week", "team"])
+    df = df.merge(teams[["season", "week", "team", "def_starters_out"]].rename(
+        columns={"team": "opponent_team", "def_starters_out": "opp_def_starters_out"}),
+        how="left", on=["season", "week", "opponent_team"])
+
+    df["implied_points"] = np.log(df["implied_points"].fillna(22.0).clip(lower=3) / 22.0)
+    df["spread"] = df["spread"].fillna(0.0) / 7.0
+    df["wind"] = (df["wind"].fillna(0.0) - 10).clip(lower=0) / 10.0
+    df["cold"] = (df["temp"].fillna(70.0) < 32).astype(float)
+    eps = 0.02 if STATS[stat][0] == "target_share" else 1.0
+    df["usage_trend"] = np.log((df["usage_recent"].fillna(0) + eps) / (df["usage_ewm"].fillna(0) + eps)).fillna(0)
+    for col in ("questionable", "limited_practice", "qb_out", "opp_def_starters_out", "home"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.5 if col == "home" else 0.0)
+    return df
+
+
+# ---------- fitting and probabilities ----------
+
+def _design(df):
+    return np.column_stack([np.ones(len(df))] + [df[c].to_numpy(dtype=float) for c in FEATURES])
+
+
+def fit(df, stat):
+    """Least-squares fit on rows with a known result and enough history. Returns a JSON-able params dict."""
+    c = STATS[stat][1]
+    train = df[df["y"].notna() & (df["prior_n"] >= MIN_PRIOR_GAMES)]
+    if len(train) < 200:
+        raise ValueError(f"only {len(train)} training rows for {stat}")
+    X = _design(train)
+    t = np.log((train["y"].to_numpy() + c) / (train["base"].to_numpy() + c))
+    beta, *_ = np.linalg.lstsq(X, t, rcond=None)
+    mu_raw = np.clip((train["base"].to_numpy() + c) * np.exp(X @ beta) - c, 0, None)
+    scale = train["y"].sum() / max(mu_raw.sum(), 1e-9)
+    mu = mu_raw * scale
+    err = np.abs(train["y"].to_numpy() - mu)
+    a, b = np.linalg.lstsq(np.column_stack([np.ones(len(mu)), mu]), err, rcond=None)[0]
+    params = {"stat": stat, "beta": dict(zip(["intercept"] + FEATURES, map(float, beta))), "scale": float(scale),
+              "sigma_a": float(a), "sigma_b": float(b), "offset": c, "rows": int(len(train))}
+    sigma = _sigma(params, mu)
+    params["z_quantiles"] = np.quantile((train["y"].to_numpy() - mu) / sigma, np.linspace(0, 1, 401)).tolist()
+    return params
+
+
+def _sigma(params, mu):
+    return np.maximum(math.sqrt(math.pi / 2) * (params["sigma_a"] + params["sigma_b"] * np.asarray(mu)), 0.5)
+
+
+def predict(df, params):
+    """Adds mu (expected stat) and sigma to each row."""
+    beta = np.array([params["beta"][k] for k in ["intercept"] + FEATURES])
+    c = params["offset"]
+    mu = np.clip((df["base"].to_numpy() + c) * np.exp(_design(df) @ beta) - c, 0, None) * params["scale"]
+    return df.assign(mu=mu, sigma=_sigma(params, mu))
+
+
+def prob_over(params, mu, sigma, line):
+    """P(stat > line) from the fitted error distribution; clipped to 1%-99% (the model is never that sure)."""
+    z = (np.asarray(line, dtype=float) - np.asarray(mu, dtype=float)) / np.asarray(sigma, dtype=float)
+    cdf = np.interp(z, params["z_quantiles"], np.linspace(0, 1, 401))
+    return np.clip(1 - cdf, 0.01, 0.99)
+
+
+# ---------- stored params ----------
+
+def save_params(conn, params, trained_through):
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO model_params VALUES (?, ?, ?, ?)",
+                     (params["stat"], trained_through, json.dumps(params),
+                      datetime.now(timezone.utc).isoformat(timespec="seconds")))
+
+
+def load_params(conn, stat):
+    row = conn.execute("SELECT params FROM model_params WHERE stat = ?", (stat,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def latest_week(conn):
+    """season * 100 + week of the latest game with stats: the data version the stored params were fitted on."""
+    row = conn.execute("SELECT max(season * 100 + week) FROM nfl_player_weeks").fetchone()
+    return row[0] or 0
+
+
+def fitted(conn, stat, positions):
+    """Stored params fitted on every finished game, refitting (and storing) them when new games arrive."""
+    version = latest_week(conn)
+    row = conn.execute("SELECT params, trained_through FROM model_params WHERE stat = ?", (stat,)).fetchone()
+    if row and row[1] >= version:
+        return json.loads(row[0])
+    params = fit(features(conn, stat, positions), stat)
+    save_params(conn, params, version)
+    return params

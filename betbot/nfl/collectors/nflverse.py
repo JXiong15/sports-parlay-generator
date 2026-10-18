@@ -61,7 +61,20 @@ def replace_table(conn, table, header, rows):
 SEASONAL = (
     ("nfl_player_weeks", PLAYER_WEEK_URL, 1999),
     ("nfl_snap_counts", SNAP_COUNTS_URL, 2013),  # the 2012 file is empty
+    ("nfl_injury_reports", INJURIES_URL, 2009),  # official injury/practice reports, for the model to learn from
 )
+
+
+def _align(seasons):
+    """[(header, rows)] per season -> one header and rows lined up by column name (files differ across years)."""
+    header = []
+    for h, _ in seasons:
+        header += [c for c in h if c not in header]
+    rows = []
+    for h, season_rows in seasons:
+        pos = [h.index(c) if c in h else None for c in header]
+        rows += [[r[i] if i is not None and i < len(r) else None for i in pos] for r in season_rows]
+    return header, rows
 
 
 def _first_saved_season(conn, table):
@@ -81,10 +94,7 @@ def load(conn, first_season=None):
     for table, url, since in SEASONAL:
         saved = _first_saved_season(conn, table)
         start = max(first_season, since) if saved is not None and saved <= since else since
-        rows = []
-        for season in range(start, current_season() + 1):
-            season_header, season_rows = _csv(url.format(season))
-            rows += season_rows
+        season_header, rows = _align([_csv(url.format(season)) for season in range(start, current_season() + 1)])
         print(f"{table}: {len(rows)} rows for {start}-{current_season()}")
         downloads.append((table, season_header, rows, start, start == since))
     # one transaction so a failed download never leaves a half-empty table
@@ -95,7 +105,10 @@ def load(conn, first_season=None):
             if full:
                 replace_table(conn, table, table_header, rows)
             else:
-                # shortcut: assumes nflverse keeps the same columns; if this errors, run a full reload with 1999
+                have = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+                for col in table_header:
+                    if col not in have:  # a new nflverse column: add it instead of failing
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {_cols([col])}")
                 conn.execute(f"DELETE FROM {table} WHERE season >= ?", (start,))
                 _insert(conn, table, table_header, rows)
     views.create(conn)
@@ -108,6 +121,14 @@ def update_practice_reports(conn):
     if rows:
         with conn:
             replace_table(conn, "nfl_practice_reports", header, rows)
+            if _first_saved_season(conn, "nfl_injury_reports") is not None:
+                # the model reads the full history table; keep its current season as fresh as this one
+                have = [r[1] for r in conn.execute("PRAGMA table_info(nfl_injury_reports)")]
+                for col in header:
+                    if col not in have:
+                        conn.execute(f"ALTER TABLE nfl_injury_reports ADD COLUMN {_cols([col])}")
+                conn.execute("DELETE FROM nfl_injury_reports WHERE season = ?", (current_season(),))
+                _insert(conn, "nfl_injury_reports", header, rows)
 
 
 def is_stale(conn, today=None):

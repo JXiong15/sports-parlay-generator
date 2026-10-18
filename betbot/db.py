@@ -143,6 +143,12 @@ CREATE TABLE IF NOT EXISTS archive_splits (  -- past game % of bets / money from
     start_time TEXT,
     UNIQUE (source, timestamp, url, away, home, market, side, line)
 );
+CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row per stat
+    stat TEXT PRIMARY KEY,
+    trained_through INTEGER NOT NULL,  -- season * 100 + week of the latest game fitted on
+    params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
+    fitted_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
