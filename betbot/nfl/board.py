@@ -42,12 +42,13 @@ def _prop_first_line(conn, r):
     return row[0] if row else None
 
 
-def prop_picks(conn, now=None):
+def prop_picks(conn, now=None, prices=None):
     """regression.evaluate for every market with lines, probabilities recalibrated on real sportsbook lines."""
     now = now or _now()
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
     shared = {"context": model.game_context(conn), "flags": model.injury_flags(conn)}  # same for every market
+    prices = prices or kalshi.Prices(conn, now)
     out = []
     for market in markets:
         results, _ = regression.evaluate(conn, market, now, shared)
@@ -69,7 +70,7 @@ def prop_picks(conn, now=None):
             first = _prop_first_line(conn, r)
             # a rising line means the market likes the Over
             moved = None if first is None else (r["line"] - first) * (1 if over else -1)
-            market_prob = kalshi.prop_prob(conn, r["game_id"], market, r["player"], pick["side"], r["line"])
+            market_prob = prices.prop(r["game_id"], market, r["player"], pick["side"], r["line"])
             d = decision.decide(pick["model_prob"], pick["price"], pick["other_price"], bets, money, moved, market_prob)
             out.append(dict(r, **pick, decision=d, bets_pct=bets, money_pct=money, line_move=moved,
                             market_prob=market_prob,
@@ -123,10 +124,11 @@ def _game_splits(conn, home, market, side, kickoff):
     return row if row else (None, None)
 
 
-def game_picks(conn, now=None):
+def game_picks(conn, now=None, prices=None):
     now = now or _now()
     g = game_model.predict(game_model.games(conn))
     calib = _game_calibrations(g)
+    prices = prices or kalshi.Prices(conn, now)
     by_game = g.set_index("game_id")
     events = conn.execute("SELECT id, home_team, away_team, commence_time FROM events WHERE commence_time > ?",
                           (now,)).fetchall()
@@ -179,7 +181,7 @@ def game_picks(conn, now=None):
             elif lines and market == "total" and lines[2] is not None and lines[3] is not None:
                 moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
             pick_line = sides[name][0] if market != "moneyline" else None
-            market_prob = kalshi.game_prob(conn, game[0], market, side, pick_line)
+            market_prob = prices.game(game[0], market, side, pick_line)
             d = decision.decide(prob, sides[name][1], sides[other][1], bets, money, moved, market_prob)
             out.append({"kind": "game", "game_id": game[0], "event_id": event_id, "market": market, "side": side,
                         "line": pick_line, "price": sides[name][1], "other_price": sides[other][1], "book": book,
@@ -192,7 +194,9 @@ def game_picks(conn, now=None):
 
 
 def build(conn, now=None):
-    return prop_picks(conn, now) + game_picks(conn, now)
+    now = now or _now()
+    prices = kalshi.Prices(conn, now)  # loaded once for props and games
+    return prop_picks(conn, now, prices) + game_picks(conn, now, prices)
 
 
 def log(conn, picks, made_at=None):

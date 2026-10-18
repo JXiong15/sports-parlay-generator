@@ -37,7 +37,10 @@ def collect():
         action_network.update(conn, "nfl")
         dk_network.update(conn, "nfl")
         weather.update(conn)
-        print("kalshi: %d open NFL markets, %d prices changed" % kalshi.update(conn))
+        try:
+            print("kalshi: %d open NFL markets, %d prices changed" % kalshi.update(conn))
+        except Exception as e:  # e.g. a database error: report it, but never block the paid odds pull below
+            print(f"kalshi failed: {e.__class__.__name__}: {e}")
         print_line_moves(conn)
 
     now = datetime.now(timezone.utc)

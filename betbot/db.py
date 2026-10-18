@@ -212,6 +212,7 @@ MIGRATIONS = {
         "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
     "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
+    "kalshi_markets": ["seen_at TEXT"],  # last run that saw this price still listed
 }
 
 
@@ -357,3 +358,10 @@ def save_kalshi(conn, rows):
         "  WHERE last.yes_bid IS :yes_bid AND last.yes_ask IS :yes_ask AND last.last_price IS :last_price)",
         [{c: r.get(c) for c in KALSHI_COLUMNS} for r in rows])
     return cur.rowcount
+
+
+def mark_kalshi_seen(conn, tickers, seen_at):
+    """Stamps each ticker's newest row as still listed in this run, so lookups can ignore markets that vanished."""
+    conn.executemany("UPDATE kalshi_markets SET seen_at = ? WHERE ticker = ? AND fetched_at ="
+                     " (SELECT max(fetched_at) FROM kalshi_markets WHERE ticker = ?)",
+                     [(seen_at, t, t) for t in tickers])
