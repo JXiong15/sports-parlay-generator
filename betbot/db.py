@@ -143,6 +143,68 @@ CREATE TABLE IF NOT EXISTS archive_splits (  -- past game % of bets / money from
     start_time TEXT,
     UNIQUE (source, timestamp, url, away, home, market, side, line)
 );
+CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row per stat
+    stat TEXT PRIMARY KEY,
+    trained_through INTEGER NOT NULL,  -- season * 100 + week of the latest game fitted on
+    params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
+    fitted_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded after the game
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,           -- prop / game
+    made_at TEXT NOT NULL,
+    game_id TEXT NOT NULL,        -- nflverse game_id
+    event_id TEXT,                -- Odds API event (props)
+    player TEXT,
+    player_id TEXT,
+    market TEXT NOT NULL,         -- player_pass_yds ... / spread / total / moneyline
+    side TEXT NOT NULL,           -- Over / Under / home / away / over / under
+    line REAL,
+    price INTEGER NOT NULL,       -- American odds of the side picked
+    other_price INTEGER,          -- the opposite side's price at the same book
+    book TEXT,
+    model_prob REAL NOT NULL,     -- our probability this side wins
+    implied_prob REAL NOT NULL,   -- the book's probability for this side, vig removed when possible
+    vig_removed INTEGER NOT NULL,
+    p_over REAL,                  -- props: model P(Over), whichever side was picked
+    mu REAL,                      -- model's expected stat / margin / total
+    actual REAL,                  -- filled by the grader
+    result TEXT,                  -- win / loss / push / void / unverified (no way to tell if he played)
+    closing_line REAL,
+    closing_price INTEGER,
+    closing_implied REAL,         -- no-vig probability of our side at the close
+    clv REAL,                     -- closing_implied - implied_prob (positive = we beat the close)
+    graded_at TEXT,
+    UNIQUE (kind, game_id, player_id, market, side, book, line)
+);
+CREATE TABLE IF NOT EXISTS parlay_correlations (  -- same-game outcome correlations measured from history
+    key TEXT PRIMARY KEY,      -- e.g. receiving_yards|passing_yards|teammates, passing_yards|T, H|T
+    value TEXT NOT NULL,       -- JSON [rho, pairs]
+    computed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kalshi_markets (  -- Kalshi prediction-market prices, saved when they change
+    ticker TEXT NOT NULL,
+    series TEXT NOT NULL,
+    event_ticker TEXT NOT NULL,
+    market TEXT NOT NULL,      -- h2h / spreads / totals / player_pass_yds ...
+    subject TEXT NOT NULL,     -- team (nflverse code), 'total', or player name
+    strike REAL,               -- YES pays if the value is above this (NULL for game winner)
+    game_date TEXT NOT NULL,
+    away TEXT NOT NULL,        -- nflverse codes, as Kalshi lists the teams
+    home TEXT NOT NULL,
+    yes_bid REAL,              -- dollars = probability
+    yes_ask REAL,
+    last_price REAL,
+    volume REAL,
+    open_interest REAL,
+    close_time TEXT,
+    fetched_at TEXT NOT NULL,
+    UNIQUE (ticker, fetched_at)
+);
+CREATE INDEX IF NOT EXISTS kalshi_lookup ON kalshi_markets (market, away, home, game_date);
+CREATE INDEX IF NOT EXISTS kalshi_ticker ON kalshi_markets (ticker, fetched_at);
+CREATE INDEX IF NOT EXISTS game_odds_latest ON game_odds (event_id, market, side, book, fetched_at);
+CREATE INDEX IF NOT EXISTS lines_latest ON lines (event_id, market, player, side, book, fetched_at);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -152,6 +214,10 @@ MIGRATIONS = {
     "nfl_game_lines": [f"{k}_{c} INTEGER" for k in ("open", "current", "close") for c in (
         "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
+    "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
+    "kalshi_markets": ["seen_at TEXT"],  # last run that saw this price still listed
+    "lines": ["seen_at TEXT"],           # last Odds API pull that still listed this line
+    "game_odds": ["seen_at TEXT"],
 }
 
 
@@ -264,3 +330,52 @@ def save_archive_splits(conn, rows):
         " :side, :line, :price, :bets_pct, :money_pct, :start_time)",
         rows,
     )
+
+
+PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "player_id", "market", "side", "line",
+                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu")
+
+
+def save_predictions(conn, rows):
+    """Keeps the first logging of each prop or game market (same game, player and market, whichever book), compared
+    with IS so empty values still match."""
+    cols = ", ".join(PREDICTION_COLUMNS)
+    # one pick per prop or game market: a later run whose favored side or line changed isn't a second bet
+    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market"))
+    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
+                           f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
+                           f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
+                           [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount
+
+
+KALSHI_COLUMNS = ("ticker", "series", "event_ticker", "market", "subject", "strike", "game_date", "away", "home",
+                  "yes_bid", "yes_ask", "last_price", "volume", "open_interest", "close_time", "fetched_at")
+
+
+def save_kalshi(conn, rows):
+    """Saves a market only when its bid, ask or last price changed since its last saved row."""
+    cols = ", ".join(KALSHI_COLUMNS)
+    cur = conn.executemany(
+        f"INSERT OR IGNORE INTO kalshi_markets ({cols}) SELECT {', '.join(':' + c for c in KALSHI_COLUMNS)}"
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT yes_bid, yes_ask, last_price FROM kalshi_markets"
+        "  WHERE ticker = :ticker ORDER BY fetched_at DESC LIMIT 1) last"
+        "  WHERE last.yes_bid IS :yes_bid AND last.yes_ask IS :yes_ask AND last.last_price IS :last_price)",
+        [{c: r.get(c) for c in KALSHI_COLUMNS} for r in rows])
+    return cur.rowcount
+
+
+
+
+SEEN_KEYS = {"lines": ("event_id", "market", "player", "side", "book"),
+             "game_odds": ("event_id", "market", "side", "book"), "kalshi_markets": ("ticker",)}
+
+
+def mark_seen(conn, table, rows, seen_at):
+    """Stamps the newest saved row of each line / market in this pull. Only changes are saved, so without this a
+    line the book took down would look the same as one whose price didn't move."""
+    keys = SEEN_KEYS[table]
+    match = " AND ".join(f"{k} = :{k}" for k in keys)
+    conn.executemany(f"UPDATE {table} SET seen_at = :seen_at WHERE {match} AND fetched_at ="
+                     f" (SELECT max(fetched_at) FROM {table} WHERE {match})",
+                     [dict({k: r[k] for k in keys}, seen_at=seen_at) for r in rows])

@@ -4,7 +4,7 @@ import io
 import os
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 import requests
 
@@ -29,10 +29,15 @@ def _value(s):
     return s
 
 
-def _csv(url):
+def _csv(url, optional=False):
+    """(header, rows). optional: a file nflverse hasn't published yet (404) or an empty one gives ([], [])."""
     resp = requests.get(url, timeout=120)
+    if optional and resp.status_code == 404:
+        return [], []
     resp.raise_for_status()
     rows = list(csv.reader(io.StringIO(resp.text)))
+    if not rows:
+        return [], []
     return rows[0], [[_value(v) for v in r] for r in rows[1:]]
 
 
@@ -47,6 +52,14 @@ def _cols(header):
     return ", ".join('"' + c.replace('"', '""') + '"' for c in header)
 
 
+def _add_missing_columns(conn, table, header):
+    """A column nflverse added since the table was made: add it instead of failing the insert."""
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for col in header:
+        if col not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {_cols([col])}")
+
+
 def _insert(conn, table, header, rows):
     conn.executemany(f"INSERT INTO {table} ({_cols(header)}) VALUES ({', '.join('?' * len(header))})", rows)
 
@@ -57,11 +70,25 @@ def replace_table(conn, table, header, rows):
     _insert(conn, table, header, rows)
 
 
-# tables kept per season: (table, url, first season nflverse has)
+# tables kept per season: (table, url, first season nflverse has, optional: may not exist yet for this season)
 SEASONAL = (
-    ("nfl_player_weeks", PLAYER_WEEK_URL, 1999),
-    ("nfl_snap_counts", SNAP_COUNTS_URL, 2013),  # the 2012 file is empty
+    ("nfl_player_weeks", PLAYER_WEEK_URL, 1999, False),
+    ("nfl_snap_counts", SNAP_COUNTS_URL, 2013, False),  # the 2012 file is empty
+    # official injury/practice reports, for the model to learn from; not published until the season starts
+    ("nfl_injury_reports", INJURIES_URL, 2009, True),
 )
+
+
+def _align(seasons):
+    """[(header, rows)] per season -> one header and rows lined up by column name (files differ across years)."""
+    header = []
+    for h, _ in seasons:
+        header += [c for c in h if c not in header]
+    rows = []
+    for h, season_rows in seasons:
+        pos = [h.index(c) if c in h else None for c in header]
+        rows += [[r[i] if i is not None and i < len(r) else None for i in pos] for r in season_rows]
+    return header, rows
 
 
 def _first_saved_season(conn, table):
@@ -78,13 +105,15 @@ def load(conn, first_season=None):
     header, games = _csv(GAMES_URL)
     players_header, players = _csv(PLAYERS_URL)
     downloads = []
-    for table, url, since in SEASONAL:
+    for table, url, since, optional in SEASONAL:
         saved = _first_saved_season(conn, table)
         start = max(first_season, since) if saved is not None and saved <= since else since
-        rows = []
-        for season in range(start, current_season() + 1):
-            season_header, season_rows = _csv(url.format(season))
-            rows += season_rows
+        files = [_csv(url.format(season), optional) for season in range(start, current_season() + 1)]
+        files = [f for f in files if f[0]]
+        if not files:
+            print(f"{table}: nothing published for {start}-{current_season()} yet, kept as is")
+            continue
+        season_header, rows = _align(files)
         print(f"{table}: {len(rows)} rows for {start}-{current_season()}")
         downloads.append((table, season_header, rows, start, start == since))
     # one transaction so a failed download never leaves a half-empty table
@@ -95,33 +124,44 @@ def load(conn, first_season=None):
             if full:
                 replace_table(conn, table, table_header, rows)
             else:
-                # shortcut: assumes nflverse keeps the same columns; if this errors, run a full reload with 1999
+                _add_missing_columns(conn, table, table_header)
                 conn.execute(f"DELETE FROM {table} WHERE season >= ?", (start,))
                 _insert(conn, table, table_header, rows)
     views.create(conn)
+    with conn:
+        db.record_pull(conn, "nflverse_load", "", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     print(f"{len(games)} games, {len(players)} players updated")
 
 
 def update_practice_reports(conn):
     """This season's official injury/practice reports; small, and they change daily during the week, so refresh every run."""
-    header, rows = _csv(INJURIES_URL.format(current_season()))
+    header, rows = _csv(INJURIES_URL.format(current_season()), optional=True)
     if rows:
         with conn:
             replace_table(conn, "nfl_practice_reports", header, rows)
+            if _first_saved_season(conn, "nfl_injury_reports") is not None:
+                # the model reads the full history table; keep its current season as fresh as this one
+                _add_missing_columns(conn, "nfl_injury_reports", header)
+                conn.execute("DELETE FROM nfl_injury_reports WHERE season = ?", (current_season(),))
+                _insert(conn, "nfl_injury_reports", header, rows)
 
 
 def is_stale(conn, today=None):
     """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
     today = today or date.today().isoformat()
     try:
-        for table in ("nfl_snap_counts", "nfl_players"):
+        for table in ("nfl_snap_counts", "nfl_players", "nfl_injury_reports"):
             conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
-        return conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM nfl_games"
-            " WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
-            " AND game_id NOT IN (SELECT game_id FROM nfl_player_weeks))",
-            (today, today),
-        ).fetchone()[0] == 1
+        missing_stats = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
+            " AND game_id NOT IN (SELECT game_id FROM nfl_player_weeks))", (today, today)).fetchone()[0]
+        # snap counts can post later than stats; reload for them at most once a day, in case one never posts
+        missing_snaps = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
+            " AND game_id NOT IN (SELECT game_id FROM nfl_snap_counts))", (today, today)).fetchone()[0]
+        last_load = conn.execute("SELECT max(fetched_at) FROM odds_pulls WHERE kind = 'nflverse_load'").fetchone()[0]
+        recent = last_load is not None and last_load[:10] >= today
+        return bool(missing_stats) or (bool(missing_snaps) and not recent)
     except sqlite3.OperationalError:  # history never loaded
         return True
 

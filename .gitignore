@@ -224,3 +224,6 @@ __marimo__/
 
 # BetBot line history
 *.db
+
+# graphify knowledge graph output
+graphify-out/
