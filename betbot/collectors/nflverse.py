@@ -2,6 +2,7 @@
 import csv
 import io
 import os
+import sqlite3
 import sys
 from datetime import date
 
@@ -52,6 +53,20 @@ def load(conn, first_season=1999):
         replace_table(conn, "nfl_games", header, games)
         replace_table(conn, "nfl_player_weeks", week_header, rows)
     print(f"{len(games)} games, {len(rows)} player-weeks loaded")
+
+
+def is_stale(conn, today=None):
+    """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
+    today = today or date.today().isoformat()
+    try:
+        return conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM nfl_games"
+            " WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
+            " AND game_id NOT IN (SELECT game_id FROM nfl_player_weeks))",
+            (today, today),
+        ).fetchone()[0] == 1
+    except sqlite3.OperationalError:  # history never loaded
+        return True
 
 
 if __name__ == "__main__":

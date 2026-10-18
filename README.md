@@ -10,15 +10,12 @@ python -m betbot.main  # pulls today's props into betbot.db
 python -m pytest
 ```
 
-## Schedule
+## Credits
 Each run costs 1 credit per game starting in the next 24h (free tier: 500/month).
-```
-0 */6 * * * cd /path/to/sports-parlay-generator && python -m betbot.main >> collect.log 2>&1
-```
 
 ## NFL history (free, no key)
 ```
 python -m betbot.collectors.nflverse        # every game since 1999 + weekly player stats
 python -m betbot.collectors.nflverse 2015   # or start from a later season
 ```
-Re-run weekly to pick up new games.
+`python -m betbot.main` reloads this automatically when it is out of date.

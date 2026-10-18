@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from betbot import db
-from betbot.collectors import odds_api
+from betbot.collectors import nflverse, odds_api
 
 
 def collect():
@@ -13,6 +13,9 @@ def collect():
     sport = os.getenv("SPORT", "americanfootball_nfl")
     market = os.getenv("MARKET", "player_pass_yds")
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
+    if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
+        print("NFL stats are out of date, updating...")
+        nflverse.load(conn)
 
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=24)
