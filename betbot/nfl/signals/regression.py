@@ -1,7 +1,7 @@
 """Recency / regression ("chasing yesterday"): lean Under when a big last game has pushed a line above the player's baseline."""
 import os
 from datetime import datetime, timezone
-from statistics import mean, median
+from statistics import mean, median, multimode
 
 from betbot import db
 from betbot.nfl.collectors.nflverse import current_season
@@ -20,24 +20,29 @@ MARKETS = {
 
 BASELINE_GAMES = 20
 MIN_GAMES = 8
+LINE_BOOK = "draftkings"  # same book as the ESPN and Action Network lines
 # shortcut: untuned guesses; backtest against stored lines before trusting them
 BLOWOUT = 1.25  # last game at least 25% over the line
 INFLATED = 1.05  # line at least 5% above both the 20-game mean and median
 
 
 def current_lines(conn, market, now):
-    """{(player, home, away): consensus line}: median across books of each book's latest Over line, games not started."""
+    """{(player, home, away): line} from each book's latest Over line, games not started.
+
+    A real, bettable line: DraftKings', else the most common one. Averaging books gives lines like 241.0 nobody offers.
+    """
     rows = conn.execute(
-        "SELECT l.player, e.home_team, e.away_team, l.line FROM lines l JOIN events e ON e.id = l.event_id"
+        "SELECT l.player, e.home_team, e.away_team, l.book, l.line FROM lines l JOIN events e ON e.id = l.event_id"
         " WHERE l.market = ? AND l.side = 'Over' AND l.line IS NOT NULL AND e.commence_time > ?"
         " AND l.book_updated_at = (SELECT max(book_updated_at) FROM lines x WHERE x.event_id = l.event_id"
         "  AND x.market = l.market AND x.player = l.player AND x.side = l.side AND x.book = l.book)",
         (market, now),
     ).fetchall()
     by_prop = {}
-    for player, home, away, line in rows:
-        by_prop.setdefault((player, home, away), []).append(line)
-    return {k: median(ls) for k, ls in by_prop.items()}
+    for player, home, away, book, line in rows:
+        by_prop.setdefault((player, home, away), {})[book] = line
+    # ties for most common go to the lower line
+    return {k: books.get(LINE_BOOK, min(multimode(books.values()))) for k, books in by_prop.items()}
 
 
 def player_index(conn, positions, since_season):

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from betbot import db
-from betbot.collectors import action_network, odds_api
+from betbot.collectors import action_network, dk_network, odds_api
 from betbot.nfl.collectors import espn, nflverse
 
 
@@ -34,6 +34,7 @@ def collect():
         espn.update_injuries(conn)
         nflverse.update_practice_reports(conn)
         action_network.update(conn, "nfl")
+        dk_network.update(conn, "nfl")
         print_line_moves(conn)
 
     now = datetime.now(timezone.utc)

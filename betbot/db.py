@@ -55,6 +55,27 @@ CREATE TABLE IF NOT EXISTS splits (  -- public betting %, kept per fetch because
     fetched_at TEXT NOT NULL,
     UNIQUE (game_id, market, side, fetched_at)
 );
+CREATE TABLE IF NOT EXISTS dk_articles (  -- DraftKings Network prop-split articles already saved
+    id INTEGER PRIMARY KEY,
+    league TEXT NOT NULL,
+    link TEXT NOT NULL,
+    published TEXT NOT NULL,
+    modified TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS prop_splits (  -- % of handle (money) and % of bets on DraftKings player props
+    article_id INTEGER NOT NULL REFERENCES dk_articles(id),
+    game TEXT,                 -- NULL in single-game articles
+    player TEXT NOT NULL,
+    market TEXT NOT NULL,      -- Odds API key, e.g. player_pass_yds
+    market_text TEXT NOT NULL, -- DraftKings' wording
+    period TEXT,               -- 1H / 1Q; NULL = full game
+    line REAL NOT NULL,
+    over_handle REAL,
+    under_handle REAL,
+    over_bets REAL,
+    under_bets REAL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -101,4 +122,16 @@ def save_splits(conn, rows):
         "INSERT OR IGNORE INTO splits VALUES (:league, :game_id, :start_time, :home_team, :away_team, :market, :side,"
         " :line, :bets_pct, :money_pct, :fetched_at)",
         rows,
+    )
+
+
+def save_prop_splits(conn, article, rows):
+    """Replaces one article's rows, so an edited article never leaves duplicates."""
+    conn.execute("DELETE FROM prop_splits WHERE article_id = ?", (article["id"],))
+    conn.execute("INSERT OR REPLACE INTO dk_articles VALUES (:id, :league, :link, :published, :modified, :fetched_at)",
+                 article)
+    conn.executemany(
+        "INSERT INTO prop_splits VALUES (:article_id, :game, :player, :market, :market_text, :period, :line, :over_handle,"
+        " :under_handle, :over_bets, :under_bets)",
+        [dict(r, article_id=article["id"]) for r in rows],
     )

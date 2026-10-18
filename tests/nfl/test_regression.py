@@ -38,12 +38,13 @@ def test_under_lean_after_blowout_game():
         ("e1", "Hot Hand", 270.5, "dk", "2026-10-17T10:00:00Z"),
         ("e1", "Hot Hand", 275.5, "dk", "2026-10-17T11:00:00Z"),  # latest dk snapshot wins
         ("e1", "Hot Hand", 270.5, "fd", "2026-10-17T11:00:00Z"),
+        ("e1", "Hot Hand", 270.5, "mgm", "2026-10-17T11:00:00Z"),
         ("e1", "Steady Eddie", 239.5, "dk", "2026-10-17T11:00:00Z"),
         ("old", "Steady Eddie", 500.5, "dk", "2026-10-11T11:00:00Z"),  # game already played: ignored
     ])
     results, problems = evaluate(conn, now=NOW)
     by = {r["player"]: r for r in results}
-    assert by["Hot Hand"]["line"] == 273.0 and by["Hot Hand"]["lean"] == "UNDER"
+    assert by["Hot Hand"]["line"] == 270.5 and by["Hot Hand"]["lean"] == "UNDER"  # most common real line, not 273
     assert by["Steady Eddie"]["line"] == 239.5 and by["Steady Eddie"]["lean"] is None
     assert problems == []
 
@@ -66,3 +67,12 @@ def test_traded_player_is_flagged():
     conn = make_db(games("t1", "Moved Guy", [250] * 20, team="DAL"), [("e1", "Moved Guy", 250.5, "dk", "2026-10-17T11:00:00Z")])
     results, _ = evaluate(conn, now=NOW)
     assert "check for a trade" in results[0]["flags"][0]
+
+
+def test_draftkings_line_preferred():
+    conn = make_db(games("q", "Some QB", [240] * 20), [
+        ("e1", "Some QB", 239.5, "draftkings", "2026-10-17T11:00:00Z"),
+        ("e1", "Some QB", 242.5, "fanduel", "2026-10-17T11:00:00Z"),
+        ("e1", "Some QB", 242.5, "betmgm", "2026-10-17T11:00:00Z"),
+    ])
+    assert evaluate(conn, now=NOW)[0][0]["line"] == 239.5
