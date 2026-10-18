@@ -35,3 +35,11 @@ def test_positive_ev_needed_even_with_edge_at_bad_price():
     # 55% vs a no-vig 50% looks like an edge, but at -150 the EV is negative
     d = decide(0.55, -150, 130)
     assert d["verdict"] == "STAY AWAY"
+
+
+def test_prediction_market_disagreeing_is_stay_away():
+    d = decide(0.60, -110, -110, market_prob=0.45)
+    assert d["verdict"] == "STAY AWAY" and "prediction market" in d["reasons"][0]
+    d = decide(0.60, -110, -110, market_prob=0.55)
+    assert d["verdict"] == "BET" and any("prediction market agrees" in r for r in d["reasons"])
+    assert decide(0.60, -110, -110, market_prob=0.49)["verdict"] == "BET"  # within 3 points: no signal

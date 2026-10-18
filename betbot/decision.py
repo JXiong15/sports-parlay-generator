@@ -6,6 +6,7 @@
    - sharp money on the other side (its money % well above its bets %)          -> STAY AWAY
    - the public piled on our side (85%+ of bets) but the line didn't move for them -> STAY AWAY (bait line)
    - the line moved against us since it opened (steam)                           -> STAY AWAY
+   - a prediction market (Kalshi) prices our side 3+ points below the book        -> STAY AWAY
    - we're against a heavy public side and sharp money agrees with us             -> FADE (fade the public)
    - otherwise                                                                   -> BET
 3. Only positive-EV picks can be BET or FADE.
@@ -19,14 +20,17 @@ MIN_EDGE = 0.03      # 3 points of probability over the book's no-vig price
 SHARP_GAP = 10       # money % minus bets % on one side that marks sharp money
 PUBLIC_HEAVY = 70    # % of bets that marks a heavy public side
 BAIT = 85            # % of bets on our side with no line move for them
+SHARP_MARKET_GAP = 0.03  # prediction-market probability this far below the book's no-vig price = disagrees
 NO_EDGE_WARNING = ("Backtest found no proven edge (game lines at coin-flip accuracy; props break-even on real "
                    "lines): research only, not a likely winner.")
 
 
-def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, line_moved_for_us=None):
+def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, line_moved_for_us=None,
+           market_prob=None):
     """model_prob: our probability this side wins. bets_pct / money_pct: % on OUR side (the other side is the
     rest). line_moved_for_us: points (or % of a prop line) the line moved toward our side since it opened;
-    negative = against us. Returns a dict with verdict, ev, edge, fair (book no-vig probability), reasons."""
+    negative = against us. market_prob: a prediction market's probability for our side (traders, no margin).
+    Returns a dict with verdict, ev, edge, fair (book no-vig probability), reasons."""
     fair, _ = no_vig(price, other_price)
     ev = expected_value(model_prob, price)
     edge = model_prob - fair
@@ -50,6 +54,9 @@ def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, l
     if line_moved_for_us is not None and line_moved_for_us < 0:
         out["reasons"].append(f"line moved against us since it opened ({line_moved_for_us:+g})")
         return out
+    if market_prob is not None and market_prob < fair - SHARP_MARKET_GAP:
+        out["reasons"].append(f"prediction market prices our side at {market_prob:.1%}, below the book's {fair:.1%}")
+        return out
     out["reasons"].append(f"EV {ev:+.1%}, edge {edge:+.1%} over the book's no-vig {fair:.1%}")
     if public_on_them and sharp_us:
         out["verdict"] = "FADE"
@@ -59,4 +66,6 @@ def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, l
         out["verdict"] = "BET"
         if sharp_us:
             out["reasons"].append("sharp money agrees")
+    if market_prob is not None and market_prob >= fair + SHARP_MARKET_GAP:
+        out["reasons"].append(f"prediction market agrees ({market_prob:.1%})")
     return out

@@ -7,6 +7,7 @@ from statistics import multimode
 from betbot import db, decision, predictions
 from betbot.names import normalize
 from betbot.nfl import game_model, model
+from betbot.nfl.collectors import kalshi
 from betbot.nfl.backtest import REAL_LINE_CALIBRATION
 from betbot.nfl.signals import regression
 from betbot.nfl.teams import TEAMS
@@ -68,8 +69,10 @@ def prop_picks(conn, now=None):
             first = _prop_first_line(conn, r)
             # a rising line means the market likes the Over
             moved = None if first is None else (r["line"] - first) * (1 if over else -1)
-            d = decision.decide(pick["model_prob"], pick["price"], pick["other_price"], bets, money, moved)
+            market_prob = kalshi.prop_prob(conn, r["game_id"], market, r["player"], pick["side"], r["line"])
+            d = decision.decide(pick["model_prob"], pick["price"], pick["other_price"], bets, money, moved, market_prob)
             out.append(dict(r, **pick, decision=d, bets_pct=bets, money_pct=money, line_move=moved,
+                            market_prob=market_prob,
                             label=f"{r['player']} {pick['side']} {r['line']} {market.replace('player_', '')}"))
     return out
 
@@ -175,12 +178,14 @@ def game_picks(conn, now=None):
                 moved = toward_home if side == "home" else -toward_home
             elif lines and market == "total" and lines[2] is not None and lines[3] is not None:
                 moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
-            d = decision.decide(prob, sides[name][1], sides[other][1], bets, money, moved)
             pick_line = sides[name][0] if market != "moneyline" else None
+            market_prob = kalshi.game_prob(conn, game[0], market, side, pick_line)
+            d = decision.decide(prob, sides[name][1], sides[other][1], bets, money, moved, market_prob)
             out.append({"kind": "game", "game_id": game[0], "event_id": event_id, "market": market, "side": side,
                         "line": pick_line, "price": sides[name][1], "other_price": sides[other][1], "book": book,
                         "model_prob": round(prob, 3), "mu": float(r["pred_margin"] if market != "total" else r["pred_total"]),
                         "decision": d, "bets_pct": bets, "money_pct": money, "line_move": moved,
+                        "market_prob": market_prob,
                         "label": f"{away} @ {home}: {name}" + (f" {pick_line:+g}" if market == "spread" else
                                                                 f" {pick_line:g}" if market == "total" else " ML")})
     return out
@@ -204,7 +209,8 @@ def print_board(picks):
         print(f"\n{verdict} ({len(chosen)})")
         for p in sorted(chosen, key=lambda p: -p["decision"]["ev"])[:40 if verdict == "STAY AWAY" else None]:
             d = p["decision"]
-            print(f"  {p['label']} ({p['price']:+d} {p['book']}): ours {p['model_prob']:.1%} vs book {d['fair']:.1%},"
+            kalshi_note = f", Kalshi {p['market_prob']:.1%}" if p.get("market_prob") is not None else ""
+            print(f"  {p['label']} ({p['price']:+d} {p['book']}): ours {p['model_prob']:.1%} vs book {d['fair']:.1%}{kalshi_note},"
                   f" EV {d['ev']:+.1%} | {'; '.join(d['reasons'])}")
 
 

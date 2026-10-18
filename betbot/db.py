@@ -182,6 +182,26 @@ CREATE TABLE IF NOT EXISTS parlay_correlations (  -- same-game outcome correlati
     value TEXT NOT NULL,       -- JSON [rho, pairs]
     computed_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kalshi_markets (  -- Kalshi prediction-market prices, saved when they change
+    ticker TEXT NOT NULL,
+    series TEXT NOT NULL,
+    event_ticker TEXT NOT NULL,
+    market TEXT NOT NULL,      -- h2h / spreads / totals / player_pass_yds ...
+    subject TEXT NOT NULL,     -- team (nflverse code), 'total', or player name
+    strike REAL,               -- YES pays if the value is above this (NULL for game winner)
+    game_date TEXT NOT NULL,
+    away TEXT NOT NULL,        -- nflverse codes, as Kalshi lists the teams
+    home TEXT NOT NULL,
+    yes_bid REAL,              -- dollars = probability
+    yes_ask REAL,
+    last_price REAL,
+    volume REAL,
+    open_interest REAL,
+    close_time TEXT,
+    fetched_at TEXT NOT NULL,
+    UNIQUE (ticker, fetched_at)
+);
+CREATE INDEX IF NOT EXISTS kalshi_lookup ON kalshi_markets (market, away, home, game_date);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -320,4 +340,20 @@ def save_predictions(conn, rows):
                            f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
                            f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
                            [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount
+
+
+KALSHI_COLUMNS = ("ticker", "series", "event_ticker", "market", "subject", "strike", "game_date", "away", "home",
+                  "yes_bid", "yes_ask", "last_price", "volume", "open_interest", "close_time", "fetched_at")
+
+
+def save_kalshi(conn, rows):
+    """Saves a market only when its bid, ask or last price changed since its last saved row."""
+    cols = ", ".join(KALSHI_COLUMNS)
+    cur = conn.executemany(
+        f"INSERT OR IGNORE INTO kalshi_markets ({cols}) SELECT {', '.join(':' + c for c in KALSHI_COLUMNS)}"
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT yes_bid, yes_ask, last_price FROM kalshi_markets"
+        "  WHERE ticker = :ticker ORDER BY fetched_at DESC LIMIT 1) last"
+        "  WHERE last.yes_bid IS :yes_bid AND last.yes_ask IS :yes_ask AND last.last_price IS :last_price)",
+        [{c: r.get(c) for c in KALSHI_COLUMNS} for r in rows])
     return cur.rowcount

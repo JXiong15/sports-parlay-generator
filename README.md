@@ -43,7 +43,8 @@ parlays. Pieces can also be run on their own (see Commands).
    (walk-forward), and props again by how they did against real sportsbook lines. This pulls overconfident
    numbers toward 50%.
 4. **Decision** (`decision.py`): no clear edge (EV under +2% or under 3 points over the book's no-vig
-   probability) -> STAY AWAY; sharp money against us, a bait line or steam against us -> STAY AWAY; fading a heavy
+   probability) -> STAY AWAY; sharp money against us, a bait line, steam against us, or Kalshi pricing our side
+   3+ points below the book -> STAY AWAY; fading a heavy
    public with sharp money on our side -> FADE; otherwise BET.
 5. **Parlays** (`parlay.py`, `nfl/parlays.py`): only positive-EV legs; same-game legs use correlations measured
    from 2013-2025 results (e.g. QB passing yards vs. the game total: +0.28); shows the true combined probability,
@@ -67,6 +68,7 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 | What | Example | Source | Status |
 |---|---|---|---|
 | Game % of bets (tickets) and % of money (handle) | Jaguars ML: 77% of bets, 65% of money | Action Network public page | Have (bets every game; money only where free), saved every run |
+| Prediction-market probability for the same bet | Stafford Over 279.5: Kalshi 51.7% vs. book 50.0% | Kalshi | Have (from Oct 18, 2026; history builds each run) |
 | Player-prop % of tickets and % of handle, Over vs. Under | Bo Nix pass yds 229.5: 24% of tickets / 22% of handle on the Over | DraftKings Network articles | Have (September 2026 on) |
 | Past game % of bets and money | Chiefs -4.5: 65% of bets, 68% of handle | Internet Archive copies of Action Network (2018 on), VSiN (2023 on) and DraftKings Network (2024 on) | Have (about 300 scattered days; money % only where the page showed it free) |
 
@@ -127,6 +129,7 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 | Injury game status | ESPN | Free | ESPN's public injury feed (unofficial) |
 | Player-prop % of tickets and % of handle (DraftKings), September 2026 on | [DraftKings Network](https://dknetwork.draftkings.com) articles | Free | Finds new articles through the site's public post list and saves each one once (1 second apart). The only free source of prop splits; DraftKings started publishing them in 2026, so there is no older history |
 | Past game % of bets and % of money/handle, 2018 on | Internet Archive copies of Action Network, VSiN and DraftKings Network | Free | Lists every saved copy, downloads each once (1.5 s apart), reads it with the reader for that site and era, and matches each row to its nflverse game. Same free-money-only rule as live |
+| Prediction-market prices (trader-set, no margin) for game winners, spread and total ladders, and player-prop ladders | [Kalshi](https://kalshi.com) | Free | Official public market-data API, no account or key; only price changes are saved |
 | % of bets and % of money | [Action Network](https://www.actionnetwork.com/nfl/public-betting) | Free | Reads the public page once per run. Only uses what a logged-out visitor sees: % of bets for every game, % of money only for the few games shown free. Game lines only; no free source has prop splits |
 
 Lines shown are real, bettable lines (DraftKings', or the most common one across books), never averages.
@@ -164,6 +167,7 @@ python3 -m betbot.collectors.action_network    # show current betting % (free)
 python3 -m betbot.collectors.dk_network nfl --all  # save every DraftKings prop-split article still online (free)
 python3 -m betbot.nfl.prop_splits              # saved prop splits as a table, by season and week (free)
 python3 -m betbot.nfl.collectors.weather       # this week's kickoff forecasts (free)
+python3 -m betbot.nfl.collectors.kalshi        # Kalshi prediction-market prices (free)
 python3 -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
 python3 -m betbot.nfl.board                    # this week's verdicts from saved data (free)
 python3 -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
@@ -199,6 +203,7 @@ betbot/
     collectors/nflverse.py     stats, snap counts, practice reports
     collectors/espn.py         game lines and prices, injuries
     collectors/weather.py      kickoff forecasts
+    collectors/kalshi.py       Kalshi prediction-market prices
     collectors/archive_splits.py  past game splits from Internet Archive copies
     views.py                   combined views (usage, defense vs. position, game context)
     model.py                   player stat model and P(Over)
@@ -228,6 +233,7 @@ Other sports will get their own folder next to `nfl/`.
 | `nfl_game_lines` | Opening, current and closing total, spread and moneyline, with prices, per game (2024+) |
 | `splits` | Public % of bets / money with DraftKings' line and price, one row per fetch |
 | `archive_splits`, `archive_captures` | Past game % of bets / money from archived pages (matched to nflverse games), and which saved copies were imported |
+| `kalshi_markets` | Kalshi prices (bid / ask = probability) for NFL games and props, saved when they change |
 | `predictions` | Every pick when made (side, line, price, our probability, book's no-vig probability), then its result and closing line value |
 | `model_params`, `parlay_correlations` | Fitted model coefficients and measured same-game correlations |
 | `nfl_injury_reports` | Official injury and practice reports since 2009 (the model learns from them) |
