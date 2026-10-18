@@ -47,3 +47,13 @@ def test_clv_counts_line_moves_toward_our_side():
     clv = backtest.game_clv(conn, g)
     # we like home -3 and the over 44; the close was home -4.5 and 45: both moved our way
     assert clv["n"] == 1 and clv["spread_avg_points"] == 1.5 and clv["total_avg_points"] == 1.0
+
+
+def test_moneyline_consistent_with_spread():
+    assert abs(game_model.normal_ppf(0.975) - 1.95996) < 1e-4
+    # a coin-flip to cover +3 (home is a 3-point dog) implies the market's margin: home wins well under half
+    p_win = game_model.p_home_wins_from_spread(0.5, 3.0, 13.5)
+    assert abs(p_win - game_model.normal_cdf(-3 / 13.5)) < 1e-9 and p_win < 0.5
+    # more likely to cover +3 than to win outright, always
+    for q in (0.4, 0.5, 0.6):
+        assert game_model.p_home_wins_from_spread(q, 3.0, 13.5) < q

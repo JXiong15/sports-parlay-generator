@@ -71,3 +71,11 @@ def test_game_picks_spread_total_moneyline():
     assert got["spread"] == (-7, "push", 3.0)  # away +7 lost by exactly 7; nflverse close: home -3 -> away +3
     assert got["total"] == (47, "loss", 44.5)
     assert got["moneyline"] == (7, "win", None)
+
+
+def test_moneyline_picks_are_not_logged_twice():
+    conn = make_db()
+    pick = {"game_id": "g1", "market": "moneyline", "side": "home", "line": None, "price": -160, "other_price": 135,
+            "model_prob": 0.66, "book": "x"}
+    assert predictions.log_games(conn, [pick]) == 1
+    assert predictions.log_games(conn, [pick]) == 0

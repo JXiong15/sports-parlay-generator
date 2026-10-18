@@ -62,6 +62,23 @@ def predict(g):
     return pd.concat([g, pd.DataFrame(out, columns=cols)], axis=1)
 
 
+def normal_ppf(q):
+    """Inverse of normal_cdf, by bisection (no scipy)."""
+    q = min(max(q, 1e-9), 1 - 1e-9)
+    lo, hi = -10.0, 10.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if normal_cdf(mid) < q else (lo, mid)
+    return (lo + hi) / 2
+
+
+def p_home_wins_from_spread(p_cover, home_spread, sigma):
+    """Win probability consistent with a (recalibrated) cover probability: the cover probability implies an
+    expected margin, which gives P(margin > 0). Keeps moneyline and spread views from contradicting each other."""
+    implied_margin = -home_spread + sigma * normal_ppf(p_cover)
+    return normal_cdf(implied_margin / sigma)
+
+
 def p_home_covers(pred_margin, home_spread, sigma):
     """home_spread in sportsbook terms (home favored by 3 = -3): home covers if margin + home_spread > 0."""
     return 1 - normal_cdf((-home_spread - pred_margin) / sigma)

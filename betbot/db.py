@@ -305,9 +305,12 @@ PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "playe
 
 
 def save_predictions(conn, rows):
-    """Keeps the first logging of each pick (same game, player, market, side, book and line)."""
+    """Keeps the first logging of each pick (same game, player, market, side, book and line). Compared with IS so
+    empty values (moneylines have no line) still count as the same pick."""
     cols = ", ".join(PREDICTION_COLUMNS)
-    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) VALUES"
-                           f" ({', '.join(':' + c for c in PREDICTION_COLUMNS)})",
+    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market", "side", "book", "line"))
+    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
+                           f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
+                           f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
                            [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
     return cur.rowcount
