@@ -17,7 +17,8 @@ It is a decision aid, not a "sure thing" generator. No bet is guaranteed. Bet on
 5. **Saves new DraftKings player-prop splits** (% of tickets and % of handle on each Over/Under) from DraftKings
    Network's articles, before DraftKings takes them down.
 6. **Gets the kickoff weather forecast** (temperature, wind, gusts, chance of rain) for this week's games.
-7. **Gets today's player prop lines** from The Odds API for games starting in the next 24 hours. This is the only
+7. **Gets game odds at every US book** (moneyline, spread, total) from The Odds API: one request, 3 credits.
+8. **Gets today's player prop lines** from The Odds API for games starting in the next 24 hours. This is the only
    step that costs API credits.
 
 Everything is saved to `betbot.db`, so later runs only fetch what's new.
@@ -53,6 +54,7 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 | What | Example | Source | Status |
 |---|---|---|---|
 | Player prop line and price at each book | Josh Allen O/U 239.5 pass yds, -115 / -105 | The Odds API (6 US books) | Have (this week, saved every run) |
+| Game spread, total, moneyline price at every US book | Packers -1.5 (-110) FanDuel, ML -118 | The Odds API (1 request, 3 credits per run) | Built; fills in from the next run |
 | Game spread, total, moneyline: opening, current, closing, with prices | Packers -1.5 (-110), total 53.5, ML -115 / -105 | ESPN odds feed | Have (2024 on, plus every upcoming game) |
 | Closing spread, total, moneyline for older games | Ravens -10.5, total 33.5 | nflverse | Have (1999 on; moneylines from about 2006) |
 | How far the line moved since it opened | Total 45.5 -> 38.5 (-7) | ESPN open vs. current | Have |
@@ -62,7 +64,7 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 |---|---|---|---|
 | Game % of bets (tickets) and % of money (handle) | Jaguars ML: 77% of bets, 65% of money | Action Network public page | Have (bets every game; money only where free), saved every run |
 | Player-prop % of tickets and % of handle, Over vs. Under | Bo Nix pass yds 229.5: 24% of tickets / 22% of handle on the Over | DraftKings Network articles | Have (September 2026 on) |
-| Past game % of bets and money | Chiefs -4.5: 65% of bets, 68% of handle | VSiN pages saved by the Internet Archive | Surveying (2023 on, scattered days) |
+| Past game % of bets and money | Chiefs -4.5: 65% of bets, 68% of handle | Internet Archive copies of Action Network (2018 on), VSiN (2023 on) and DraftKings Network (2024 on) | Have (about 300 scattered days; money % only where the page showed it free) |
 
 ### The player
 | What | Example | Source | Status |
@@ -93,16 +95,14 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 | Player prop prices before Oct 17, 2026 | The free Odds API plan has no history; we only have what we've saved since | Paid Odds API history plan, or keep saving every run |
 | Prices for prop markets other than QB passing yards | We only pull `player_pass_yds` | Add markets to the Odds API pull (about 12 credits each per run) |
 | First-half / first-quarter prop prices | Not pulled | Odds API period markets (extra credits) |
-| Game prices from more than one book | ESPN gives one book (DraftKings or ESPN BET); Action Network's we save is DraftKings | Odds API game odds, all US books in one request (about 3 credits per run) |
 | Sharp-book prices (Pinnacle, Circa) | Not in the Odds API's US books | Odds API non-US region (doubles the credits) |
 | Moneylines for 1999-2005, and some 2006/2008 games | nflverse doesn't have them | No free source found |
 | Price movement during the day | ESPN gives open / current / close only | More runs on game day, or a paid odds-history plan |
 
 ### Future data to add
 - **Prices on DraftKings prop splits**: the articles don't list odds; match each prop to the same line in the Odds API data instead.
-- **Archived game splits (2023 on)**: import the Internet Archive copies of VSiN's DraftKings splits page (survey in progress).
+- **Archived consensus picks (2012 on)**: Covers and OddsShark pages saved by the Internet Archive show % of their users' picks (not real bets or money). Weaker signal; import labeled separately if wanted.
 - **More player-prop markets from the Odds API**: rushing yards, receiving yards, receptions, TDs (about 12 credits each per run).
-- **This week's game moneylines and prices from several books**: the Odds API's game odds (about 3 credits per run); ESPN only gives one book.
 - **Sharp-book lines (Pinnacle, Circa)**: for "which book moved first"; needs the Odds API's non-US region (double the credits).
 - **Line history within a day (steam)**: more runs on game day, or a paid odds-history plan.
 - **Play-by-play detail**: red-zone touches, air yards per target, pass rate over expected (nflverse play-by-play, free).
@@ -122,6 +122,7 @@ For every prop or game, these are the pieces of data side by side. "Have" = coll
 | Player ID links (connects snap counts to stats) | nflverse | Free | Downloads the public player table |
 | Injury game status | ESPN | Free | ESPN's public injury feed (unofficial) |
 | Player-prop % of tickets and % of handle (DraftKings), September 2026 on | [DraftKings Network](https://dknetwork.draftkings.com) articles | Free | Finds new articles through the site's public post list and saves each one once (1 second apart). The only free source of prop splits; DraftKings started publishing them in 2026, so there is no older history |
+| Past game % of bets and % of money/handle, 2018 on | Internet Archive copies of Action Network, VSiN and DraftKings Network | Free | Lists every saved copy, downloads each once (1.5 s apart), reads it with the reader for that site and era, and matches each row to its nflverse game. Same free-money-only rule as live |
 | % of bets and % of money | [Action Network](https://www.actionnetwork.com/nfl/public-betting) | Free | Reads the public page once per run. Only uses what a logged-out visitor sees: % of bets for every game, % of money only for the few games shown free. Game lines only; no free source has prop splits |
 
 Lines shown are real, bettable lines (DraftKings', or the most common one across books), never averages.
@@ -145,6 +146,7 @@ Optional settings in `.env`:
 | `SPORT` | `americanfootball_nfl` | Any [Odds API sport key](https://the-odds-api.com/sports-odds-data/sports-apis.html) |
 | `MARKET` | `player_pass_yds` | Odds API prop market |
 | `DB_PATH` | `betbot.db` | Where the database lives |
+| `ODDS_REFRESH_HOURS` | `2` | Paid Odds API requests made within this many hours are skipped, so re-running costs nothing |
 
 ## Commands
 
@@ -158,13 +160,15 @@ python3 -m betbot.collectors.action_network    # show current betting % (free)
 python3 -m betbot.collectors.dk_network nfl --all  # save every DraftKings prop-split article still online (free)
 python3 -m betbot.nfl.prop_splits              # saved prop splits as a table, by season and week (free)
 python3 -m betbot.nfl.collectors.weather       # this week's kickoff forecasts (free)
+python3 -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
 python3 -m pytest                              # tests (fake data, no internet, no credits)
 ```
 
 ## API credits
 
-Each full run costs about 1 credit per game starting in the next 24 hours (about 12-15 on a Sunday). Everything else
-is free. Tests and the picks check never use credits.
+Each full run costs 3 credits for game odds plus about 1 credit per game starting in the next 24 hours for props (about 15-18 on a Sunday). Everything else
+is free. Tests and the picks check never use credits. Re-running within 2 hours (`ODDS_REFRESH_HOURS`) skips the paid
+requests, and only lines or prices that actually changed are saved.
 
 ## Project layout
 
@@ -183,6 +187,7 @@ betbot/
     collectors/nflverse.py     stats, snap counts, practice reports
     collectors/espn.py         game lines and prices, injuries
     collectors/weather.py      kickoff forecasts
+    collectors/archive_splits.py  past game splits from Internet Archive copies
     views.py                   combined views (usage, defense vs. position, game context)
     signals/regression.py      "chasing yesterday" picks
     signals/injuries.py        injury flags
@@ -195,7 +200,7 @@ Other sports will get their own folder next to `nfl/`.
 
 | Table | What's in it |
 |---|---|
-| `events`, `lines` | Odds API games and every prop line snapshot (history builds up with each run) |
+| `events`, `lines`, `game_odds` | Odds API games, every prop line snapshot, and every game moneyline/spread/total price at each book (history builds up with each run) |
 | `nfl_games` | Every NFL game since 1999 with scores and closing lines |
 | `nfl_player_weeks` | Weekly stats for every player since 1999 |
 | `nfl_snap_counts` | Snap counts for every player since 2013 (used to tell who starts) |
@@ -205,6 +210,7 @@ Other sports will get their own folder next to `nfl/`.
 | `nfl_injuries` | Latest ESPN injury statuses |
 | `nfl_game_lines` | Opening, current and closing total, spread and moneyline, with prices, per game (2024+) |
 | `splits` | Public % of bets / money with DraftKings' line and price, one row per fetch |
+| `archive_splits`, `archive_captures` | Past game % of bets / money from archived pages (matched to nflverse games), and which saved copies were imported |
 | `dk_articles`, `prop_splits` | DraftKings prop-split articles saved, and each prop's line, % of tickets and % of handle |
 
 Ready-made views combine these: `nfl_player_usage` (snap %, targets, target share per game),

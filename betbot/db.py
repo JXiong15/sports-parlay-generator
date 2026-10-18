@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -100,6 +101,48 @@ CREATE TABLE IF NOT EXISTS nfl_weather (  -- kickoff forecast, refreshed each ru
     precip_pct REAL,
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS game_odds (  -- moneyline / spread / total at every US book, one row per book snapshot
+    id INTEGER PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id),
+    market TEXT NOT NULL,      -- h2h (moneyline) / spreads / totals
+    side TEXT NOT NULL,        -- team name, or Over / Under
+    line REAL,                 -- NULL for moneylines
+    price INTEGER NOT NULL,    -- American odds
+    book TEXT NOT NULL,
+    book_updated_at TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    UNIQUE (event_id, market, side, book, book_updated_at)
+);
+CREATE TABLE IF NOT EXISTS odds_pulls (  -- when each paid Odds API request was made, to skip repeats
+    kind TEXT NOT NULL,        -- 'game_odds' or the prop market, e.g. 'player_pass_yds'
+    event_id TEXT NOT NULL,    -- '' for game odds (one request covers every game)
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_captures (  -- Internet Archive copies already imported
+    source TEXT NOT NULL,
+    timestamp TEXT NOT NULL,   -- when the archive saved the page (YYYYMMDDhhmmss, UTC)
+    url TEXT NOT NULL,
+    rows_read INTEGER NOT NULL,
+    rows_matched INTEGER NOT NULL,  -- rows tied to an nflverse game
+    imported_at TEXT NOT NULL,
+    PRIMARY KEY (source, timestamp, url)
+);
+CREATE TABLE IF NOT EXISTS archive_splits (  -- past game % of bets / money from archived pages
+    source TEXT NOT NULL,      -- action_network / vsin_dk / vsin_circa / dk_network
+    timestamp TEXT NOT NULL,   -- when the page was saved (the numbers as of then)
+    url TEXT NOT NULL,
+    game_id TEXT,              -- nflverse game_id; NULL if no game matched
+    away TEXT,                 -- team text as the page wrote it
+    home TEXT,
+    market TEXT NOT NULL,      -- spread / total / moneyline
+    side TEXT NOT NULL,        -- home / away / over / under
+    line REAL,
+    price INTEGER,
+    bets_pct REAL,
+    money_pct REAL,            -- NULL when the page didn't show it for free
+    start_time TEXT,
+    UNIQUE (source, timestamp, url, away, home, market, side, line)
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -132,9 +175,13 @@ def save_event(conn, event):
 
 
 def save_lines(conn, rows):
+    """Saves only lines whose line or price changed since that book's last saved one. Returns how many changed."""
     cur = conn.executemany(
         "INSERT OR IGNORE INTO lines (event_id, market, player, side, line, price, book, book_updated_at, fetched_at)"
-        " VALUES (:event_id, :market, :player, :side, :line, :price, :book, :book_updated_at, :fetched_at)",
+        " SELECT :event_id, :market, :player, :side, :line, :price, :book, :book_updated_at, :fetched_at"
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT line, price FROM lines WHERE event_id = :event_id"
+        "  AND market = :market AND player = :player AND side = :side AND book = :book"
+        "  ORDER BY fetched_at DESC, id DESC LIMIT 1) last WHERE last.line IS :line AND last.price = :price)",
         rows,
     )
     return cur.rowcount
@@ -183,3 +230,37 @@ def save_weather(conn, row):
                                               (row["game_id"],)).fetchone():
         return
     _upsert(conn, "nfl_weather", row)
+
+
+def save_game_odds(conn, rows):
+    """Saves only prices that changed since that book's last saved one. Returns how many changed."""
+    cur = conn.executemany(
+        "INSERT OR IGNORE INTO game_odds (event_id, market, side, line, price, book, book_updated_at, fetched_at)"
+        " SELECT :event_id, :market, :side, :line, :price, :book, :book_updated_at, :fetched_at"
+        " WHERE NOT EXISTS (SELECT 1 FROM (SELECT line, price FROM game_odds WHERE event_id = :event_id"
+        "  AND market = :market AND side = :side AND book = :book"
+        "  ORDER BY fetched_at DESC, id DESC LIMIT 1) last WHERE last.line IS :line AND last.price = :price)",
+        rows,
+    )
+    return cur.rowcount
+
+
+def record_pull(conn, kind, event_id, fetched_at):
+    conn.execute("INSERT INTO odds_pulls VALUES (?, ?, ?)", (kind, event_id, fetched_at))
+
+
+def hours_since_pull(conn, kind, event_id, now):
+    """Hours since this Odds API request was last made (None if never), so recent ones can be skipped."""
+    last = conn.execute("SELECT max(fetched_at) FROM odds_pulls WHERE kind = ? AND event_id = ?",
+                        (kind, event_id)).fetchone()[0]
+    if last is None:
+        return None
+    return (now - datetime.fromisoformat(last)).total_seconds() / 3600
+
+
+def save_archive_splits(conn, rows):
+    conn.executemany(
+        "INSERT OR IGNORE INTO archive_splits VALUES (:source, :timestamp, :url, :game_id, :away, :home, :market,"
+        " :side, :line, :price, :bets_pct, :money_pct, :start_time)",
+        rows,
+    )

@@ -28,6 +28,35 @@ def get_event_odds(api_key, sport, event_id, market, regions="us"):
     )
 
 
+def get_game_odds(api_key, sport, markets="h2h,spreads,totals", regions="us"):
+    """Moneyline, spread and total for every upcoming game in one request: 1 credit per market per region (3 total),
+    however many games there are."""
+    return _get(
+        f"/sports/{sport}/odds",
+        {"apiKey": api_key, "regions": regions, "markets": markets, "oddsFormat": "american"},
+    )
+
+
+def parse_game_odds(events, fetched_at):
+    """side is the team name for moneyline/spread and Over/Under for totals; line is empty for moneylines."""
+    rows = []
+    for event in events:
+        for book in event.get("bookmakers", []):
+            for market in book["markets"]:
+                for o in market["outcomes"]:
+                    rows.append({
+                        "event_id": event["id"],
+                        "market": market["key"],
+                        "side": o["name"],
+                        "line": o.get("point"),
+                        "price": o["price"],
+                        "book": book["key"],
+                        "book_updated_at": market.get("last_update") or book["last_update"],
+                        "fetched_at": fetched_at,
+                    })
+    return rows
+
+
 def parse_props(event_odds, fetched_at):
     rows = []
     for book in event_odds.get("bookmakers", []):

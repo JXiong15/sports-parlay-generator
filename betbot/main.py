@@ -42,17 +42,40 @@ def collect():
     horizon = now + timedelta(hours=24)
     fetched_at = now.isoformat(timespec="seconds")
     remaining = None
+    # paid requests made within this many hours are skipped, so re-running soon after costs nothing
+    refresh_hours = float(os.getenv("ODDS_REFRESH_HOURS", "2"))
+    fresh = lambda kind, event_id: (lambda h: h is not None and h < refresh_hours)(
+        db.hours_since_pull(conn, kind, event_id, now))
+
+    if fresh("game_odds", ""):
+        print(f"game odds: pulled less than {refresh_hours:g}h ago, skipped (0 credits)")
+    else:
+        games, remaining = odds_api.get_game_odds(api_key, sport)
+        with conn:
+            for event in games:
+                db.save_event(conn, event)
+            changed = db.save_game_odds(conn, odds_api.parse_game_odds(games, fetched_at))
+            db.record_pull(conn, "game_odds", "", fetched_at)
+        print(f"game odds: {changed} prices changed across {len(games)} games (3 credits)")
+
     # skip live games and anything beyond 24h: each event costs a credit
+    skipped = 0
     for event in odds_api.get_events(api_key, sport):
         start = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
         if not now < start < horizon:
             continue
+        if fresh(market, event["id"]):
+            skipped += 1
+            continue
         odds, remaining = odds_api.get_event_odds(api_key, sport, event["id"], market)
         with conn:
             db.save_event(conn, event)
-            added = db.save_lines(conn, odds_api.parse_props(odds, fetched_at))
-        print(f"{event['away_team']} @ {event['home_team']}: {added} new lines")
-    print(f"credits remaining: {remaining}")
+            changed = db.save_lines(conn, odds_api.parse_props(odds, fetched_at))
+            db.record_pull(conn, market, event["id"], fetched_at)
+        print(f"{event['away_team']} @ {event['home_team']}: {changed} lines changed (1 credit)")
+    if skipped:
+        print(f"props: {skipped} games pulled less than {refresh_hours:g}h ago, skipped (0 credits)")
+    print(f"credits remaining: {remaining if remaining is not None else 'unchanged (no paid requests)'}")
 
 
 if __name__ == "__main__":
