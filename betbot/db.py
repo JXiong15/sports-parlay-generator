@@ -41,6 +41,20 @@ CREATE TABLE IF NOT EXISTS nfl_injuries (  -- latest ESPN report only, replaced 
     status TEXT NOT NULL,     -- Out, Doubtful, Questionable, Injured Reserve, ...
     fetched_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS splits (  -- public betting %, kept per fetch because they change
+    league TEXT NOT NULL,
+    game_id INTEGER NOT NULL,  -- Action Network id
+    start_time TEXT NOT NULL,
+    home_team TEXT,
+    away_team TEXT,
+    market TEXT NOT NULL,      -- spread / total / moneyline
+    side TEXT,                 -- home / away / over / under
+    line REAL,
+    bets_pct INTEGER,
+    money_pct INTEGER,         -- NULL when the free page doesn't show it
+    fetched_at TEXT NOT NULL,
+    UNIQUE (game_id, market, side, fetched_at)
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -79,4 +93,12 @@ def replace_injuries(conn, rows):
     conn.execute("DELETE FROM nfl_injuries")
     conn.executemany(
         "INSERT INTO nfl_injuries VALUES (:team, :player, :name_key, :position, :status, :fetched_at)", rows
+    )
+
+
+def save_splits(conn, rows):
+    conn.executemany(
+        "INSERT OR IGNORE INTO splits VALUES (:league, :game_id, :start_time, :home_team, :away_team, :market, :side,"
+        " :line, :bets_pct, :money_pct, :fetched_at)",
+        rows,
     )
