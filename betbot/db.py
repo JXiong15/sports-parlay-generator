@@ -149,6 +149,34 @@ CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row 
     params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
     fitted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded after the game
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,           -- prop / game
+    made_at TEXT NOT NULL,
+    game_id TEXT NOT NULL,        -- nflverse game_id
+    event_id TEXT,                -- Odds API event (props)
+    player TEXT,
+    player_id TEXT,
+    market TEXT NOT NULL,         -- player_pass_yds ... / spread / total / moneyline
+    side TEXT NOT NULL,           -- Over / Under / home / away / over / under
+    line REAL,
+    price INTEGER NOT NULL,       -- American odds of the side picked
+    other_price INTEGER,          -- the opposite side's price at the same book
+    book TEXT,
+    model_prob REAL NOT NULL,     -- our probability this side wins
+    implied_prob REAL NOT NULL,   -- the book's probability for this side, vig removed when possible
+    vig_removed INTEGER NOT NULL,
+    p_over REAL,                  -- props: model P(Over), whichever side was picked
+    mu REAL,                      -- model's expected stat / margin / total
+    actual REAL,                  -- filled by the grader
+    result TEXT,                  -- win / loss / push / void
+    closing_line REAL,
+    closing_price INTEGER,
+    closing_implied REAL,         -- no-vig probability of our side at the close
+    clv REAL,                     -- closing_implied - implied_prob (positive = we beat the close)
+    graded_at TEXT,
+    UNIQUE (kind, game_id, player_id, market, side, book, line)
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -270,3 +298,16 @@ def save_archive_splits(conn, rows):
         " :side, :line, :price, :bets_pct, :money_pct, :start_time)",
         rows,
     )
+
+
+PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "player_id", "market", "side", "line",
+                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu")
+
+
+def save_predictions(conn, rows):
+    """Keeps the first logging of each pick (same game, player, market, side, book and line)."""
+    cols = ", ".join(PREDICTION_COLUMNS)
+    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) VALUES"
+                           f" ({', '.join(':' + c for c in PREDICTION_COLUMNS)})",
+                           [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount

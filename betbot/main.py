@@ -3,9 +3,11 @@ from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
-from betbot import db
+from betbot import db, predictions
 from betbot.collectors import action_network, dk_network, odds_api
+from betbot.nfl import grader
 from betbot.nfl.collectors import espn, nflverse, weather
+from betbot.nfl.signals import regression
 
 
 def print_line_moves(conn):
@@ -76,6 +78,11 @@ def collect():
     if skipped:
         print(f"props: {skipped} games pulled less than {refresh_hours:g}h ago, skipped (0 credits)")
     print(f"credits remaining: {remaining if remaining is not None else 'unchanged (no paid requests)'}")
+
+    if sport == "americanfootball_nfl" and market in regression.MARKETS:
+        results, _ = regression.evaluate(conn, market)
+        print(f"predictions: {predictions.log_props(conn, results)} new picks logged")
+        print(f"graded: {grader.grade(conn)} finished picks")
 
 
 if __name__ == "__main__":
