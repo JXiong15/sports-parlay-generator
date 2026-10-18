@@ -4,7 +4,19 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 from betbot import db
-from betbot.collectors import nflverse, odds_api
+from betbot.collectors import espn, nflverse, odds_api
+
+
+def print_line_moves(conn):
+    rows = conn.execute(
+        "SELECT g.away_team, g.home_team, l.open_total, l.current_total, l.open_home_spread, l.current_home_spread"
+        " FROM nfl_game_lines l JOIN nfl_games g USING (game_id)"
+        " WHERE g.gameday >= date('now', 'localtime') ORDER BY g.gameday, g.gametime"
+    ).fetchall()
+    for away, home, ot, ct, os_, cs in rows:
+        total = f"total {ot} -> {ct}" + (f" ({ct - ot:+g})" if None not in (ot, ct) and ct != ot else "")
+        spread = f"{home} spread {os_:+g} -> {cs:+g}" if None not in (os_, cs) else f"{home} spread n/a"
+        print(f"{away} @ {home}: {total}, {spread}")
 
 
 def collect():
@@ -16,6 +28,9 @@ def collect():
     if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
         print("NFL stats are out of date, updating...")
         nflverse.load(conn)
+    if sport == "americanfootball_nfl":
+        espn.update(conn, espn.upcoming(conn))
+        print_line_moves(conn)
 
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=24)

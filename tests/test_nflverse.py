@@ -23,3 +23,15 @@ def test_is_stale():
     replace_table(conn, "nfl_player_weeks", ["game_id"], [["g1"]])
     assert not is_stale(conn, "2026-10-17")  # g2 is too recent to expect stats
     assert is_stale(conn, "2026-10-19")  # g2 should have stats by now
+
+
+def test_load_only_refreshes_current_season(monkeypatch):
+    from betbot.collectors import nflverse
+    conn = db.connect(":memory:")
+    replace_table(conn, "nfl_player_weeks", ["season", "game_id"], [[2010, "old"], [2026, "stale"]])
+    files = {nflverse.GAMES_URL: (["game_id"], [["g"]]),
+             nflverse.PLAYER_WEEK_URL.format(2026): (["season", "game_id"], [[2026, "new"]])}
+    monkeypatch.setattr(nflverse, "_csv", lambda url: files[url])  # any other season URL would KeyError
+    monkeypatch.setattr(nflverse, "current_season", lambda: 2026)
+    nflverse.load(conn)
+    assert conn.execute("SELECT game_id FROM nfl_player_weeks ORDER BY season").fetchall() == [("old",), ("new",)]

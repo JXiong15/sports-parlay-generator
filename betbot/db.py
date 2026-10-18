@@ -22,6 +22,17 @@ CREATE TABLE IF NOT EXISTS lines (
     -- one row per book snapshot: re-polling an unchanged market adds nothing
     UNIQUE (event_id, market, player, side, book, book_updated_at)
 );
+CREATE TABLE IF NOT EXISTS nfl_game_lines (
+    game_id TEXT PRIMARY KEY,  -- nflverse game_id
+    book TEXT NOT NULL,
+    open_total REAL,
+    current_total REAL,
+    close_total REAL,
+    open_home_spread REAL,
+    current_home_spread REAL,
+    close_home_spread REAL,
+    fetched_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS lines_history ON lines (event_id, market, player, book, book_updated_at);
 """
 
@@ -46,3 +57,11 @@ def save_lines(conn, rows):
         rows,
     )
     return cur.rowcount
+
+
+def save_game_line(conn, row):
+    conn.execute(
+        "INSERT OR REPLACE INTO nfl_game_lines VALUES (:game_id, :book, :open_total, :current_total, :close_total,"
+        " :open_home_spread, :current_home_spread, :close_home_spread, :fetched_at)",
+        row,
+    )

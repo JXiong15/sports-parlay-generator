@@ -32,27 +32,47 @@ def _csv(url):
     return rows[0], [[_value(v) for v in r] for r in rows[1:]]
 
 
+def current_season(today=None):
+    today = today or date.today()
+    # NFL seasons start in September, so before then the latest season is last year's
+    return today.year if today.month >= 9 else today.year - 1
+
+
+def _cols(header):
+    return ", ".join(f'"{c}"' for c in header)
+
+
+def _insert(conn, table, header, rows):
+    conn.executemany(f"INSERT INTO {table} ({_cols(header)}) VALUES ({', '.join('?' * len(header))})", rows)
+
+
 def replace_table(conn, table, header, rows):
-    cols = ", ".join(f'"{c}"' for c in header)
     conn.execute(f"DROP TABLE IF EXISTS {table}")
-    conn.execute(f"CREATE TABLE {table} ({cols})")
-    conn.executemany(f"INSERT INTO {table} ({cols}) VALUES ({', '.join('?' * len(header))})", rows)
+    conn.execute(f"CREATE TABLE {table} ({_cols(header)})")
+    _insert(conn, table, header, rows)
 
 
-def load(conn, first_season=1999):
+def load(conn, first_season=None):
+    """By default re-downloads only the current season once history exists; everything since 1999 the first time."""
+    has_history = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'nfl_player_weeks'").fetchone()
+    if first_season is None:
+        first_season = current_season() if has_history else 1999
     header, games = _csv(GAMES_URL)
     rows = []
-    # NFL seasons start in September, so before then the latest season is last year's
-    last_season = date.today().year if date.today().month >= 9 else date.today().year - 1
-    for season in range(first_season, last_season + 1):
+    for season in range(first_season, current_season() + 1):
         week_header, week_rows = _csv(PLAYER_WEEK_URL.format(season))
         rows += week_rows
         print(f"{season}: {len(week_rows)} player-weeks")
-    # reload everything in one transaction so a failed download never leaves a half-empty table
+    # one transaction so a failed download never leaves a half-empty table
     with conn:
         replace_table(conn, "nfl_games", header, games)
-        replace_table(conn, "nfl_player_weeks", week_header, rows)
-    print(f"{len(games)} games, {len(rows)} player-weeks loaded")
+        if has_history and first_season > 1999:
+            # shortcut: assumes nflverse keeps the same columns; if this errors, run a full reload with 1999
+            conn.execute("DELETE FROM nfl_player_weeks WHERE season >= ?", (first_season,))
+            _insert(conn, "nfl_player_weeks", week_header, rows)
+        else:
+            replace_table(conn, "nfl_player_weeks", week_header, rows)
+    print(f"{len(games)} games, {len(rows)} player-weeks updated")
 
 
 def is_stale(conn, today=None):
@@ -70,4 +90,4 @@ def is_stale(conn, today=None):
 
 
 if __name__ == "__main__":
-    load(db.connect(os.getenv("DB_PATH", "betbot.db")), int(sys.argv[1]) if len(sys.argv) > 1 else 1999)
+    load(db.connect(os.getenv("DB_PATH", "betbot.db")), int(sys.argv[1]) if len(sys.argv) > 1 else None)
