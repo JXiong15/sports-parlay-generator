@@ -191,9 +191,11 @@ def fit(df, stat):
     if len(train) < 200:
         raise ValueError(f"only {len(train)} training rows for {stat}")
     X = _design(train)
-    t = np.log((train["y"].to_numpy() + c) / (train["base"].to_numpy() + c))
+    # yards can be negative (a -6 yard rushing day); the log-scale fit floors at 0, the error distribution doesn't
+    base = train["base"].clip(lower=0).to_numpy()
+    t = np.log((train["y"].clip(lower=0).to_numpy() + c) / (base + c))
     beta, *_ = np.linalg.lstsq(X, t, rcond=None)
-    mu_raw = np.clip((train["base"].to_numpy() + c) * np.exp(X @ beta) - c, 0, None)
+    mu_raw = np.clip((base + c) * np.exp(X @ beta) - c, 0, None)
     scale = train["y"].sum() / max(mu_raw.sum(), 1e-9)
     mu = mu_raw * scale
     err = np.abs(train["y"].to_numpy() - mu)
@@ -213,15 +215,71 @@ def predict(df, params):
     """Adds mu (expected stat) and sigma to each row."""
     beta = np.array([params["beta"][k] for k in ["intercept"] + FEATURES])
     c = params["offset"]
-    mu = np.clip((df["base"].to_numpy() + c) * np.exp(_design(df) @ beta) - c, 0, None) * params["scale"]
+    mu = np.clip((df["base"].clip(lower=0).to_numpy() + c) * np.exp(_design(df) @ beta) - c, 0, None) * params["scale"]
     return df.assign(mu=mu, sigma=_sigma(params, mu))
 
 
-def prob_over(params, mu, sigma, line):
-    """P(stat > line) from the fitted error distribution; clipped to 1%-99% (the model is never that sure)."""
+def _raw_prob_over(params, mu, sigma, line):
     z = (np.asarray(line, dtype=float) - np.asarray(mu, dtype=float)) / np.asarray(sigma, dtype=float)
-    cdf = np.interp(z, params["z_quantiles"], np.linspace(0, 1, 401))
-    return np.clip(1 - cdf, 0.01, 0.99)
+    return np.clip(1 - np.interp(z, params["z_quantiles"], np.linspace(0, 1, 401)), 0.001, 0.999)
+
+
+def prob_over(params, mu, sigma, line):
+    """P(stat > line): fitted error distribution, then recalibrated by how earlier out-of-sample probabilities
+    actually hit (when params has 'calib'); clipped to 1%-99% (the model is never that sure)."""
+    p = _raw_prob_over(params, mu, sigma, line)
+    if "calib" in params:
+        p = recalibrate(p, params["calib"])
+    return np.clip(p, 0.01, 0.99)
+
+
+def _logit(p):
+    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
+    return np.log(p / (1 - p))
+
+
+def recalibrate(p, calib):
+    a, b = calib
+    return 1 / (1 + np.exp(-(a + b * _logit(p))))
+
+
+def fit_recalibration(p, won, ridge=1.0):
+    """Platt scaling: logit(p_true) = a + b * logit(p). Newton steps with a small ridge toward (0, 1)."""
+    x, y = _logit(p), np.asarray(won, dtype=float)
+    X = np.column_stack([np.ones(len(x)), x])
+    w = np.array([0.0, 1.0])
+    for _ in range(50):
+        q = 1 / (1 + np.exp(-(X @ w)))
+        grad = X.T @ (q - y) + ridge * (w - [0.0, 1.0])
+        hess = (X * (q * (1 - q))[:, None]).T @ X + ridge * np.eye(2)
+        step = np.linalg.solve(hess, grad)
+        w -= step
+        if np.abs(step).max() < 1e-8:
+            break
+    return [float(w[0]), float(w[1])]
+
+
+def fit_calibrated(df, stat, folds=4):
+    """fit(), plus a recalibration learned walk-forward on the last `folds` seasons: each season is predicted by
+    a model fitted only on earlier seasons, against lines at the baseline and half a deviation either side."""
+    params = fit(df, stat)
+    seasons = sorted(df.loc[df["y"].notna(), "season"].unique())
+    ps, wins = [], []
+    for season in seasons[-folds:]:
+        train = df[df["season"] < season]
+        test = df[(df["season"] == season) & df["y"].notna() & (df["prior_n"] >= MIN_PRIOR_GAMES)]
+        test = test[test["base"] >= 0.5 * test["pos_mean"]]
+        if test.empty or (train["y"].notna() & (train["prior_n"] >= MIN_PRIOR_GAMES)).sum() < 200:
+            continue
+        inner = fit(train, stat)
+        pred = predict(test, inner)
+        for k in (-0.5, 0.0, 0.5):
+            line = np.floor(pred["base"] + k * pred["sigma"]) + 0.5
+            ps += list(_raw_prob_over(inner, pred["mu"], pred["sigma"], line))
+            wins += list((pred["y"] > line).astype(int))
+    if len(ps) >= 200:
+        params["calib"] = fit_recalibration(ps, wins)
+    return params
 
 
 # ---------- stored params ----------
@@ -250,6 +308,6 @@ def fitted(conn, stat, positions):
     row = conn.execute("SELECT params, trained_through FROM model_params WHERE stat = ?", (stat,)).fetchone()
     if row and row[1] >= version:
         return json.loads(row[0])
-    params = fit(features(conn, stat, positions), stat)
+    params = fit_calibrated(features(conn, stat, positions), stat)
     save_params(conn, params, version)
     return params

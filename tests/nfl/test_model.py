@@ -69,3 +69,28 @@ def test_fit_refuses_too_little_data():
         assert "training rows" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_negative_stats_dont_break_the_fit():
+    df, ctx = synthetic()
+    df.loc[df.index[::7], "y"] = -6.0  # e.g. a -6 yard rushing day
+    params = model.fit(build(df, ctx), "passing_yards")
+    assert np.all(np.isfinite(list(params["beta"].values())))
+
+
+def test_recalibration_shrinks_overconfident_probabilities():
+    rng = np.random.default_rng(3)
+    true = rng.uniform(0.3, 0.7, 5000)
+    won = (rng.uniform(size=5000) < true).astype(int)
+    overconfident = 1 / (1 + np.exp(-3 * np.log(true / (1 - true))))  # says 0.85 when truth is 0.65
+    a, b = model.fit_recalibration(overconfident, won)
+    assert 0.2 < b < 0.5 and abs(a) < 0.1
+    fixed = model.recalibrate(overconfident, (a, b))
+    assert abs(np.mean(fixed[true > 0.6]) - np.mean(won[true > 0.6])) < 0.03
+
+
+def test_prob_over_applies_stored_calibration():
+    params = {"z_quantiles": list(np.linspace(-3, 3, 401))}
+    raw = model.prob_over(params, 250.0, 30.0, 200.0)
+    shrunk = model.prob_over(dict(params, calib=[0.0, 0.5]), 250.0, 30.0, 200.0)
+    assert 0.5 < shrunk < raw
