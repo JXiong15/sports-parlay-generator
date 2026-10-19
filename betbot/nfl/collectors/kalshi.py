@@ -105,19 +105,38 @@ MAX_PAGES = 50
 def fetch(series):
     markets, cursor, seen = [], None, set()
     for _ in range(MAX_PAGES):  # a repeated or endless cursor can't hang the run
+        if cursor in seen:
+            return markets
         params = {"series_ticker": series, "status": "open", "limit": 1000}
         if cursor:
             params["cursor"] = cursor
         resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        markets += data.get("markets", [])
+        markets += data.get("markets") or []  # a null list is an empty page
+        seen.add(cursor)
         cursor = data.get("cursor")
         time.sleep(0.3)
-        if not cursor or cursor in seen:
+        if not cursor:
             return markets
-        seen.add(cursor)
+    print(f"  kalshi {series}: stopped at {MAX_PAGES} pages, some markets may be missing")
     return markets
+
+
+def _parse_all(raw, series):
+    """parse_market over a page, skipping a market whose data is malformed (and saying how many)."""
+    rows, bad = [], 0
+    for m in raw:
+        try:
+            row = parse_market(m, series)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            bad += 1
+            continue
+        if row:
+            rows.append(row)
+    if bad:
+        print(f"  kalshi {series}: skipped {bad} malformed markets")
+    return rows
 
 
 def update(conn):
@@ -125,11 +144,11 @@ def update(conn):
     changed = total = 0
     for series in SERIES:
         try:
-            rows = [r for r in (parse_market(m, series) for m in fetch(series)) if r]
+            rows = _parse_all(fetch(series), series)
             with conn:
                 changed += db.save_kalshi(conn, [dict(r, fetched_at=fetched_at) for r in rows])
                 db.mark_seen(conn, "kalshi_markets", rows, fetched_at)
-        except (requests.RequestException, ValueError, KeyError, TypeError) as e:  # Kalshi down or odd data
+        except (requests.RequestException, ValueError) as e:  # Kalshi down or odd data; code bugs still raise
             print(f"  kalshi {series} skipped: {e.__class__.__name__}: {e}")
             continue
         total += len(rows)
@@ -144,14 +163,19 @@ class Prices:
 
     def __init__(self, conn, now=None):
         self.conn = conn
+        self._games = {}
         now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # stored timestamps are UTC ISO text with +00:00; match that so plain text comparison orders them
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00")).astimezone(timezone.utc)
+        now = now_dt.isoformat(timespec="seconds")
+        oldest = (now_dt - timedelta(hours=FRESH_HOURS)).isoformat(timespec="seconds")
         self.by = {}
         for market, subject, strike, away, home, day, bid, ask in conn.execute(
                 "SELECT k.market, k.subject, k.strike, k.away, k.home, k.game_date, k.yes_bid, k.yes_ask"
-                " FROM kalshi_markets k WHERE k.seen_at IS NOT NULL"
-                " AND (julianday(?) - julianday(k.seen_at)) * 24 <= ?"
-                " AND k.fetched_at = (SELECT max(fetched_at) FROM kalshi_markets x WHERE x.ticker = k.ticker)",
-                (now, FRESH_HOURS)):
+                " FROM kalshi_markets k WHERE k.seen_at BETWEEN ? AND ?"  # seen within FRESH_HOURS, never after `now`
+                " AND k.fetched_at = (SELECT max(fetched_at) FROM kalshi_markets x WHERE x.ticker = k.ticker"
+                "  AND x.fetched_at <= ?)",
+                (oldest, now, now)):
             p = fair_prob(bid, ask)
             if p is not None:
                 key = (market, frozenset((away, home)), day)
@@ -166,8 +190,10 @@ class Prices:
         return []
 
     def _game(self, game_id):
-        return self.conn.execute("SELECT away_team, home_team, gameday FROM nfl_games WHERE game_id = ?",
-                                 (game_id,)).fetchone()
+        if game_id not in self._games:
+            self._games[game_id] = self.conn.execute(
+                "SELECT away_team, home_team, gameday FROM nfl_games WHERE game_id = ?", (game_id,)).fetchone()
+        return self._games[game_id]
 
     def prop(self, game_id, market, player, side, line):
         """Kalshi's probability for our side of a prop, or None if Kalshi has no fresh tight price there."""
@@ -189,9 +215,13 @@ class Prices:
             p_over = interpolate(ladder("totals", "total"), line)
             return None if p_over is None else (p_over if side == "over" else 1 - p_over)
         team, other = (home, away) if side == "home" else (away, home)
-        if market == "moneyline" or line == 0:  # a pick'em spread is a moneyline
-            points = self._points("h2h", (away, home), day, team)
-            return points[0][1] if points else None
+        if market == "moneyline" or line == 0:
+            # a tie pushes a moneyline or pick'em bet, but Kalshi's "team wins" markets both lose on a tie, so use
+            # the two teams' win prices normalized: P(win | not a tie)
+            ours, theirs = self._points("h2h", (away, home), day, team), self._points("h2h", (away, home), day, other)
+            if ours and theirs:
+                return ours[0][1] / (ours[0][1] + theirs[0][1])
+            return ours[0][1] if ours else None  # the other team's price is missing: ties are rare, use ours alone
         # spread from our side: a favorite (-x) must win by more than x; an underdog (+x) covers unless the
         # other team wins by more than x
         if line < 0:

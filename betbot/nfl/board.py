@@ -57,7 +57,7 @@ def prop_picks(conn, now=None, prices=None):
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
     flags = model.injury_flags(conn)
-    shared = {"context": model.game_context(conn), "flags": flags,  # same for every market: built once
+    shared = {"context": model.game_context(conn), "flags": flags, "snaps": model.snap_shares(conn),  # built once
               "absences": model.team_absences(conn, flags, _upcoming_team_weeks(conn, now))}
     prices = prices or kalshi.Prices(conn, now)
     out = []
@@ -72,20 +72,27 @@ def prop_picks(conn, now=None, prices=None):
             pick = predictions.prop_pick(r)
             if pick is None:
                 continue
-            over = pick["side"] == "Over"
             splits = _prop_splits(conn, r["player"], market, r["line"])
-            bets = money = None
-            if splits and splits[0] is not None:
-                bets = splits[0] if over else 100 - splits[0]
-                money = (splits[1] if over else 100 - splits[1]) if splits[1] is not None else None
             first = _prop_first_line(conn, r)
-            # a rising line means the market likes the Over
-            moved = None if first is None else (r["line"] - first) * (1 if over else -1)
-            market_prob = prices.prop(r["game_id"], market, r["player"], pick["side"], r["line"])
-            d = decision.decide(pick["model_prob"], pick["price"], pick["other_price"], bets, money, moved, market_prob)
-            out.append(dict(r, **pick, decision=d, bets_pct=bets, money_pct=money, line_move=moved,
-                            market_prob=market_prob,
-                            label=f"{r['player']} {pick['side']} {r['line']} {market.replace('player_', '')}"))
+            sides = []
+            for side, prob, price, other in (("Over", r["p_over"], r["over_price"], r["under_price"]),
+                                             ("Under", 1 - r["p_over"], r["under_price"], r["over_price"])):
+                over = side == "Over"
+                bets = money = None
+                if splits and splits[0] is not None:
+                    bets = splits[0] if over else 100 - splits[0]
+                    money = (splits[1] if over else 100 - splits[1]) if splits[1] is not None else None
+                # a rising line means the market likes the Over
+                moved = None if first is None else (r["line"] - first) * (1 if over else -1)
+                market_prob = prices.prop(r["game_id"], market, r["player"], side, r["line"])
+                d = decision.decide(prob, price, other, bets, money, moved, market_prob) if price is not None else None
+                sides.append({"side": side, "model_prob": prob, "price": price, "other_price": other,
+                              "line": r["line"], "decision": d, "bets_pct": bets, "money_pct": money,
+                              "line_move": moved, "market_prob": market_prob,
+                              "label": f"{r['player']} {side} {r['line']} {market.replace('player_', '')}"})
+            chosen = next(s for s in sides if s["side"] == pick["side"])
+            out.append(dict(r, **pick, **{k: chosen[k] for k in ("decision", "bets_pct", "money_pct", "line_move",
+                                                                 "market_prob", "label")}, sides=sides))
     return out
 
 
@@ -126,8 +133,9 @@ def _game_offers(conn, event_id):
         if LINE_BOOK in books:
             out[market] = (LINE_BOOK, books[LINE_BOOK])
         else:
-            common = multimode(tuple(sorted(v[0] or 0 for v in sides.values())) for sides in books.values())[0]
-            book = sorted(b for b, sides in books.items() if tuple(sorted(v[0] or 0 for v in sides.values())) == common)[0]
+            keys = {b: tuple(sorted(v[0] or 0 for v in sides.values())) for b, sides in books.items()}
+            common = min(multimode(keys.values()))  # most common line; ties go to the lower one
+            book = min(b for b, k in keys.items() if k == common)
             out[market] = (book, books[book])
     return out
 
@@ -166,6 +174,12 @@ def game_picks(conn, now=None, prices=None):
         if not game or game[0] not in by_game.index:
             continue
         r = by_game.loc[game[0]]
+        book_home = home  # the betting splits are stored under the sportsbooks' home team
+        swapped = TEAMS.get(home) != r["home_team"]
+        if swapped:
+            # neutral site listed the other way round: the model, ESPN lines, Kalshi and the grader all use
+            # nflverse's home team, so the prices must too
+            home, away = away, home
         lines = conn.execute("SELECT open_home_spread, current_home_spread, open_total, current_total"
                              " FROM nfl_game_lines WHERE game_id = ?", (game[0],)).fetchone()
         offers = _game_offers(conn, event_id)
@@ -197,27 +211,29 @@ def game_picks(conn, now=None, prices=None):
                 else:
                     continue
                 a_name, b_name, a_side, b_side = home, away, "home", "away"
-            pick_a = p_a >= 0.5
-            name, other, side = (a_name, b_name, a_side) if pick_a else (b_name, a_name, b_side)
-            prob = float(p_a if pick_a else 1 - p_a)
-            bets, money = _game_splits(conn, home, market, side, kickoff)
-            moved = None
-            if lines and market == "spread" and lines[0] is not None and lines[1] is not None:
-                toward_home = lines[0] - lines[1]   # home spread getting more negative = market likes home
-                moved = toward_home if side == "home" else -toward_home
-            elif lines and market == "total" and lines[2] is not None and lines[3] is not None:
-                moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
-            pick_line = sides[name][0] if market != "moneyline" else None
-            market_prob = prices.game(game[0], market, side, pick_line)
-            other_price = _matching_other_price(market, sides[name], sides[other])
-            d = decision.decide(prob, sides[name][1], other_price, bets, money, moved, market_prob)
-            out.append({"kind": "game", "game_id": game[0], "event_id": event_id, "market": market, "side": side,
-                        "line": pick_line, "price": sides[name][1], "other_price": other_price, "book": book,
-                        "model_prob": round(prob, 3), "mu": float(r["pred_margin"] if market != "total" else r["pred_total"]),
-                        "decision": d, "bets_pct": bets, "money_pct": money, "line_move": moved,
-                        "market_prob": market_prob,
-                        "label": f"{away} @ {home}: {name}" + (f" {pick_line:+g}" if market == "spread" else
-                                                                f" {pick_line:g}" if market == "total" else " ML")})
+            both = []
+            for name, other, side, prob in ((a_name, b_name, a_side, float(p_a)), (b_name, a_name, b_side, float(1 - p_a))):
+                splits_side = {"home": "away", "away": "home"}.get(side, side) if swapped else side
+                bets, money = _game_splits(conn, book_home, market, splits_side, kickoff)
+                moved = None
+                if lines and market == "spread" and lines[0] is not None and lines[1] is not None:
+                    toward_home = lines[0] - lines[1]   # home spread getting more negative = market likes home
+                    moved = toward_home if side == "home" else -toward_home
+                elif lines and market == "total" and lines[2] is not None and lines[3] is not None:
+                    moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
+                side_line = sides[name][0] if market != "moneyline" else None
+                market_prob = prices.game(game[0], market, side, side_line)
+                other_price = _matching_other_price(market, sides[name], sides[other])
+                both.append({"side": side, "model_prob": prob, "line": side_line, "price": sides[name][1],
+                             "other_price": other_price, "bets_pct": bets, "money_pct": money, "line_move": moved,
+                             "market_prob": market_prob,
+                             "decision": decision.decide(prob, sides[name][1], other_price, bets, money, moved,
+                                                         market_prob),
+                             "label": f"{away} @ {home}: {name}" + (f" {side_line:+g}" if market == "spread" else
+                                                                     f" {side_line:g}" if market == "total" else " ML")})
+            chosen = both[0] if p_a >= 0.5 else both[1]  # the side the model favors is the pick
+            out.append(dict(chosen, kind="game", game_id=game[0], event_id=event_id, market=market, book=book,
+                            mu=float(r["pred_margin"] if market != "total" else r["pred_total"]), sides=both))
     return out
 
 

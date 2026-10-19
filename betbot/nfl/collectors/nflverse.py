@@ -146,8 +146,9 @@ def update_practice_reports(conn):
                 _insert(conn, "nfl_injury_reports", header, rows)
 
 
-def is_stale(conn, today=None):
-    """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
+def is_stale(conn, today=None, now=None):
+    """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats, or no
+    snap counts and the last full load was 24+ hours ago. today / now default to the real date and clock."""
     today = today or date.today().isoformat()
     try:
         for table in ("nfl_snap_counts", "nfl_players", "nfl_injury_reports"):
@@ -159,9 +160,8 @@ def is_stale(conn, today=None):
         missing_snaps = conn.execute(
             "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
             " AND game_id NOT IN (SELECT game_id FROM nfl_snap_counts))", (today, today)).fetchone()[0]
-        last_load = conn.execute("SELECT max(fetched_at) FROM odds_pulls WHERE kind = 'nflverse_load'").fetchone()[0]
-        recent = last_load is not None and last_load[:10] >= today
-        return bool(missing_stats) or (bool(missing_snaps) and not recent)
+        hours = db.hours_since_pull(conn, "nflverse_load", "", now or datetime.now(timezone.utc))
+        return bool(missing_stats) or (bool(missing_snaps) and (hours is None or hours >= 24))
     except sqlite3.OperationalError:  # history never loaded
         return True
 

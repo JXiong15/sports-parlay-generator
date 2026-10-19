@@ -54,15 +54,27 @@ def evaluate(legs, rho):
     probs = [leg["prob"] for leg in legs]
     true_p = joint_probability(probs, corr) if np.any(corr != np.eye(n)) else float(np.prod(probs))
     dec = float(np.prod([decimal_odds(leg["price"]) for leg in legs]))
-    return {"legs": legs, "true_prob": true_p, "independent_prob": float(np.prod(probs)),
-            "decimal": dec, "price": american(dec), "ev": true_p * dec - 1,
+    return {"legs": legs, "true_prob": true_p, "independent_prob": float(np.prod(probs)), "decimal": dec,
+            "price": american(dec), "ev": true_p * dec - 1,
+            # how far our combined chance beats the chance the parlay's payout implies
+            "conviction": true_p - 1 / dec,
             "same_game": any(legs[i]["game"] == legs[j]["game"] for i, j in combinations(range(n), 2))}
 
 
-def build(legs, rho, conflicts, max_legs=3, top=10, pool=12):
-    """Best parlays of 2..max_legs legs from the `pool` highest-EV legs, positive EV only, sorted by EV.
-    conflicts(a, b) -> True for legs that can't go together (both sides of one bet, for example)."""
-    candidates = sorted(legs, key=lambda leg: -leg["ev"])[:pool]
+RANKINGS = {
+    "ev": lambda r: -r["ev"],
+    # highest combined conviction first, then the bigger payout
+    "conviction": lambda r: (-r["conviction"], -r["decimal"]),
+}
+
+
+def build(legs, rho, conflicts, max_legs=3, top=10, pool=12, rank="ev"):
+    """Best parlays of 2..max_legs legs from the `pool` best legs (by EV, or by edge when rank is 'conviction'),
+    positive EV only, sorted by `rank` ('ev', or 'conviction' = combined edge then payout).
+    conflicts(a, b) -> True for legs that can't go together."""
+    # the pool is the best legs by the same measure the parlays are ranked by
+    pool_key = (lambda leg: -leg.get("edge", leg["ev"])) if rank == "conviction" else (lambda leg: -leg["ev"])
+    candidates = sorted(legs, key=pool_key)[:pool]
     out = []
     for size in range(2, max_legs + 1):
         for combo in combinations(candidates, size):
@@ -71,4 +83,4 @@ def build(legs, rho, conflicts, max_legs=3, top=10, pool=12):
             result = evaluate(list(combo), rho)
             if result["ev"] > 0:
                 out.append(result)
-    return sorted(out, key=lambda r: -r["ev"])[:top]
+    return sorted(out, key=RANKINGS[rank])[:top]

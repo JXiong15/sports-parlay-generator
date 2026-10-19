@@ -28,9 +28,9 @@ def test_rho_signs_follow_the_sides():
 
 
 def test_legs_and_conflicts():
-    picks = [{"decision": {"verdict": "BET", "ev": 0.05}, "label": "x", "model_prob": 0.56, "price": -110,
+    picks = [{"decision": {"verdict": "BET", "ev": 0.05, "edge": 0.04}, "label": "x", "model_prob": 0.56, "price": -110,
               "game_id": "2026_06_DAL_GB", "side": "home", "market": "spread", "kind": "game"},
-             {"decision": {"verdict": "STAY AWAY", "ev": 0.08}, "label": "y", "model_prob": 0.6, "price": -110,
+             {"decision": {"verdict": "STAY AWAY", "ev": 0.08, "edge": 0.06}, "label": "y", "model_prob": 0.6, "price": -110,
               "game_id": "2026_06_DAL_GB", "side": "over", "market": "total", "kind": "game"}]
     legs = parlays.legs(picks)
     assert len(legs) == 1 and legs[0]["home"] == "GB" and legs[0]["away"] == "DAL"
@@ -38,3 +38,40 @@ def test_legs_and_conflicts():
     assert not parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "home") | {"game": "g"})
     assert parlays.conflicts(prop(), prop("Under") | {"market": "player_x"})
     assert not parlays.conflicts(prop(), prop(player="qb2"))
+
+
+
+def side(name, prob, price, other_price, label, **extra):
+    from betbot.decision import decide
+    return {"side": name, "model_prob": prob, "price": price, "other_price": other_price, "label": label,
+            "decision": decide(prob, price, other_price, extra.get("bets_pct"), extra.get("money_pct"))}
+
+
+def game_pick(home_prob, home_price=200, away_price=-250, **extra):
+    """A moneyline pick with both sides as the board builds them (labels name each side's own team)."""
+    sides = [side("home", home_prob, home_price, away_price, "DAL @ GB: Green Bay Packers ML", **extra),
+             side("away", 1 - home_prob, away_price, home_price, "DAL @ GB: Dallas Cowboys ML")]
+    chosen = sides[0] if home_prob >= 0.5 else sides[1]
+    return dict(chosen, kind="game", game_id="2026_06_DAL_GB", market="moneyline", sides=sides)
+
+
+def test_hunt_keeps_plus_money_high_edge_sides_only():
+    # +200 at 40%: no-vig price ~31%, edge ~9 points -> not enough at 12
+    assert parlays.hunt_legs([game_pick(0.40)], min_conv=0.12) == []
+    # at 48% the edge is ~17 points: kept, even though the board's pick is the other side
+    legs = parlays.hunt_legs([game_pick(0.48)], min_conv=0.12)
+    assert len(legs) == 1 and legs[0]["price"] == 200 and legs[0]["edge"] > 0.15
+    # outside +150..+400 is dropped, however big the edge
+    assert parlays.hunt_legs([game_pick(0.48, 450, -600)]) == []
+    assert parlays.hunt_legs([game_pick(0.70, -110, -110)]) == []
+
+
+def test_hunt_leg_names_the_side_actually_bet():
+    legs = parlays.hunt_legs([game_pick(0.48)], min_conv=0.12)
+    assert legs[0]["side"] == "home" and legs[0]["label"] == "DAL @ GB: Green Bay Packers ML"
+
+
+def test_hunt_still_applies_market_checks():
+    # sharp money on the other side: 70% of the money vs 30% of the bets -> STAY AWAY, so no leg
+    legs = parlays.hunt_legs([game_pick(0.48, bets_pct=70, money_pct=30)], min_conv=0.12)
+    assert legs == []

@@ -1,4 +1,8 @@
+import contextlib
+import io
 import os
+import re
+import traceback
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -22,6 +26,49 @@ def print_line_moves(conn):
         print(f"{away} @ {home}: {total}, {spread}")
 
 
+def _flag(name, default=False):
+    """An on/off setting from .env: 1 / true / yes (unset or empty = default)."""
+    value = os.getenv(name, "")
+    return default if value == "" else value.lower() in ("1", "true", "yes")
+
+
+MIN_REPEAT_HOURS = 0.25  # even FORCE_ODDS_PULL never repeats the same paid request within 15 minutes
+PROBLEM_WORDS = re.compile(r"skipped|failed|missing|couldn't|could not|unknown|invalid|no readable|stopped at|"
+                           r"not published|error|timed out|unavailable|blocked|forbidden|\b(?:403|429|500|503)\b|"
+                           r"no data|no games|unexpected", re.IGNORECASE)
+
+
+def problems(output):
+    """The lines of a collector's hidden output that report something wrong, so short mode still shows them."""
+    return [line.strip() for line in output.splitlines() if PROBLEM_WORDS.search(line)]
+
+
+def should_pull_game_odds(hours_since_last, pulled_this_week, in_sunday_window, refresh_hours, no_paid, force):
+    """Whether to spend 3 credits on game odds. Same priority as props: NO_PAID_REQUESTS always wins; FORCE_ODDS_PULL
+    overrides everything except a repeat within 15 minutes; otherwise not within refresh_hours, and either not
+    pulled yet this week or it's Sunday 11am-noon Central."""
+    if no_paid:
+        return False
+    if hours_since_last is not None and hours_since_last < (MIN_REPEAT_HOURS if force else refresh_hours):
+        return False
+    return force or not pulled_this_week or in_sunday_window
+
+
+def should_pull_props(mins_to_kickoff, hours_since_last, refresh_hours, no_paid, force):
+    """Whether to spend a credit on one game's props. NO_PAID_REQUESTS always wins; FORCE_ODDS_PULL comes next.
+    Otherwise skip if pulled within refresh_hours, except one pull in the last hour before kickoff (at most hourly)."""
+    if no_paid:
+        return False
+    if hours_since_last is not None and hours_since_last < MIN_REPEAT_HOURS:
+        return False  # even forced: no repeat within 15 minutes (a stray FORCE_ODDS_PULL in .env can't drain credits)
+    if force:
+        return True
+    if 0 < mins_to_kickoff <= 60:
+        # the last hour before kickoff: at least one pull, never stricter than the normal refresh window
+        return hours_since_last is None or hours_since_last >= min(1, refresh_hours)
+    return hours_since_last is None or hours_since_last >= refresh_hours
+
+
 def collect():
     load_dotenv()
     api_key = os.environ["ODDS_API_KEY"]
@@ -30,21 +77,30 @@ def collect():
     if "," in market:
         raise SystemExit("MARKET takes one prop market per run (pulls are tracked per market)")
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
+    parlay_only = _flag("PARLAY_ONLY", default=True)  # short output; PARLAY_ONLY=0 shows everything
     if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
         print("NFL stats are out of date, updating...")
         nflverse.load(conn)
     if sport == "americanfootball_nfl":
-        espn.update(conn, espn.upcoming(conn))
-        espn.update_injuries(conn)
-        nflverse.update_practice_reports(conn)
-        action_network.update(conn, "nfl")
-        dk_network.update(conn, "nfl")
-        weather.update(conn)
-        try:
-            print("kalshi: %d open NFL markets, %d prices changed" % kalshi.update(conn))
-        except Exception as e:  # e.g. a database error: report it, but never block the paid odds pull below
-            print(f"kalshi failed: {e.__class__.__name__}: {e}")
-        print_line_moves(conn)
+        steps = (("espn lines", lambda: espn.update(conn, espn.upcoming(conn))),
+                 ("espn injuries", lambda: espn.update_injuries(conn)),
+                 ("practice reports", lambda: nflverse.update_practice_reports(conn)),
+                 ("action network", lambda: action_network.update(conn, "nfl")),
+                 ("dk network", lambda: dk_network.update(conn, "nfl")),
+                 ("weather", lambda: weather.update(conn)),
+                 ("kalshi", lambda: print("kalshi: %d open NFL markets, %d prices changed" % kalshi.update(conn))))
+        for name, step in steps:
+            # a failed free source is reported and skipped; it never blocks the paid odds pull below
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out) if parlay_only else contextlib.nullcontext():
+                    step()
+            except Exception as e:
+                print(f"{name} failed: {e.__class__.__name__}: {e}")
+            for line in problems(out.getvalue()):  # short mode hides the chatter, not the warnings
+                print(f"{name}: {line}")
+        if not parlay_only:
+            print_line_moves(conn)
 
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(hours=24)
@@ -52,47 +108,19 @@ def collect():
     remaining = None
     # paid requests made within this many hours are skipped, so re-running soon after costs nothing
     refresh_hours = float(os.getenv("ODDS_REFRESH_HOURS", "2"))
+    force_pull = _flag("FORCE_ODDS_PULL")  # pull now even if pulled recently or already this week
+    no_paid = _flag("NO_PAID_REQUESTS")    # never spend credits this run (wins over FORCE_ODDS_PULL)
+    credits_used = 0
 
-    # Central Time helpers: allow one weekly run plus a window at 11am CT on Sundays
+    # game odds: once a week, plus a window at 11am-noon Central on Sundays
     ct = ZoneInfo("America/Chicago")
     now_ct = now.astimezone(ct)
-    start_of_week_ct = (now_ct.replace(hour=0, minute=0, second=0, microsecond=0)
-                        - timedelta(days=now_ct.weekday()))
-
-    def pulled_this_week(kind, event_id):
-        h = db.hours_since_pull(conn, kind, event_id, now)
-        if h is None:
-            return False
-        last = now - timedelta(hours=h)
-        return last.astimezone(ct) >= start_of_week_ct
-
-    def fresh(kind, event_id):
-        """Return True when the last pull was recent enough to skip entirely (< refresh_hours).
-        Weekly and Sunday-11am logic is handled separately."""
-        h = db.hours_since_pull(conn, kind, event_id, now)
-        return h is not None and h < refresh_hours
-
-    # Manual override: set FORCE_ODDS_PULL=1 (or true/yes) to force paid pulls now
-    force_pull = os.getenv("FORCE_ODDS_PULL", "").lower() in ("1", "true", "yes")
-    # When set, skip all paid Odds API requests (safe for dry runs)
-    no_paid = os.getenv("NO_PAID_REQUESTS", "").lower() in ("1", "true", "yes")
-
+    week_start = now_ct.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now_ct.weekday())
     game_kind = odds_api.game_odds_kind(sport)  # per sport, so an MLB run doesn't count as an NFL pull
-    # Decide whether to run the paid game-odds request:
-    # - skip if we pulled very recently (< refresh_hours)
-    # - otherwise, allow if we haven't pulled this week OR it's Sunday 11am CT, or if forced
-    in_sunday_11am_window = now_ct.weekday() == 6 and 11 <= now_ct.hour < 12
-    if no_paid:
-        print("NO_PAID_REQUESTS set: skipping all paid Odds API requests (game odds + props)")
-        games = []
-        remaining = None
-    elif fresh(game_kind, ""):
-        print(f"game odds: pulled less than {refresh_hours:g}h ago, skipped (0 credits)")
-        games = []
-    elif pulled_this_week(game_kind, "") and not (in_sunday_11am_window or force_pull):
-        print("game odds: already pulled this week, skipping until Sunday 11am CT (or set FORCE_ODDS_PULL=1)")
-        games = []
-    else:
+    last = db.hours_since_pull(conn, game_kind, "", now)
+    games = []
+    if should_pull_game_odds(last, last is not None and (now - timedelta(hours=last)).astimezone(ct) >= week_start,
+                             now_ct.weekday() == 6 and 11 <= now_ct.hour < 12, refresh_hours, no_paid, force_pull):
         games, remaining = odds_api.get_game_odds(api_key, sport)
         with conn:
             for event in games:
@@ -101,45 +129,25 @@ def collect():
             changed = db.save_game_odds(conn, rows)
             db.mark_seen(conn, "game_odds", rows, fetched_at)
             db.record_pull(conn, game_kind, "", fetched_at)
+        credits_used += 3  # charged for the request (1 per market), even if no games come back
         print(f"game odds: {changed} prices changed across {len(games)} games (3 credits)")
+    elif no_paid:
+        print("NO_PAID_REQUESTS set: no paid Odds API requests this run")
+    else:
+        print("game odds: pulled recently or already this week, skipped (0 credits; FORCE_ODDS_PULL=1 to pull)")
 
-    # skip live games and anything beyond 24h: each event costs a credit
-    skipped = 0
+    # props: games starting in the next 24 hours, 1 credit each
+    to_pull, skipped = [], 0
     for event in odds_api.get_events(api_key, sport):
         start = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
         if not now < start < horizon:
             continue
-        # minutes until kickoff
-        mins_to_kick = (start - now).total_seconds() / 60
-        within_one_hour = 0 < mins_to_kick <= 60
-
-        # when the event was last pulled (hours); None if never
-        last_h = db.hours_since_pull(conn, market, event["id"], now)
-        last_mins = None if last_h is None else last_h * 60
-
-        allow_pull = False
-        if force_pull:
-            allow_pull = True
-        elif no_paid:
-            # default: skip paid requests unless it hasn't been pulled this week, or it's within one hour
-            if not pulled_this_week(market, event["id"]):
-                allow_pull = True
-            elif within_one_hour and (last_mins is None or last_mins >= 60):
-                allow_pull = True
-            else:
-                allow_pull = False
+        if should_pull_props((start - now).total_seconds() / 60, db.hours_since_pull(conn, market, event["id"], now),
+                             refresh_hours, no_paid, force_pull):
+            to_pull.append(event)
         else:
-            # paid allowed normally: skip if pulled recently (< refresh_hours), except allow one pull within the hour
-            if within_one_hour:
-                # allow only if not pulled in the last 60 minutes
-                allow_pull = last_mins is None or last_mins >= 60
-            else:
-                allow_pull = not fresh(market, event["id"])  # respect refresh_hours
-
-        if not allow_pull:
             skipped += 1
-            continue
-
+    for idx, event in enumerate(to_pull, start=1):
         odds, remaining = odds_api.get_event_odds(api_key, sport, event["id"], market)
         with conn:
             db.save_event(conn, event)
@@ -147,18 +155,30 @@ def collect():
             changed = db.save_lines(conn, rows)
             db.mark_seen(conn, "lines", rows, fetched_at)
             db.record_pull(conn, market, event["id"], fetched_at)
-        print(f"{event['away_team']} @ {event['home_team']}: {changed} lines changed (1 credit)")
-    if skipped:
-        print(f"props: {skipped} games skipped (no paid request)")
-    print(f"credits remaining: {remaining if remaining is not None else 'unchanged (no paid requests)'}")
+        credits_used += 1
+        print(f"props {idx}/{len(to_pull)}: {event['away_team']} @ {event['home_team']}: {changed} lines changed (1 credit)")
+    print(f"credits used: {credits_used}; remaining: {remaining if remaining is not None else 'unchanged'};"
+          f" props pulled for {len(to_pull)} games, {skipped} skipped")
 
     if sport == "americanfootball_nfl":
-        print(f"graded: {grader.grade(conn)} finished picks")  # first: doesn't depend on the board
-        picks = board.build(conn)
-        props_logged, games_logged = board.log(conn, picks)
+        graded = grader.grade(conn)  # first: doesn't depend on the board
+        if not parlay_only:
+            print(f"graded: {graded} finished picks")
+        try:
+            picks = board.build(conn)
+            props_logged, games_logged = board.log(conn, picks)
+        except Exception as e:  # the data pulled above is saved either way
+            print(f"board failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()  # a code bug shows up here with its traceback, not just one line
+            return
         print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
-        board.print_board(picks)
-        parlays.print_parlays(*parlays.build(conn, picks))
+        if not parlay_only:
+            board.print_board(picks)
+        try:
+            parlays.print_parlays(*parlays.build(conn, picks))
+        except Exception as e:
+            print(f"parlays failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
 
 
 if __name__ == "__main__":

@@ -158,6 +158,9 @@ Optional settings in `.env`:
 | `MARKET` | `player_pass_yds` | Odds API prop market |
 | `DB_PATH` | `betbot.db` | Where the database lives |
 | `ODDS_REFRESH_HOURS` | `2` | Paid Odds API requests made within this many hours are skipped, so re-running costs nothing |
+| `NO_PAID_REQUESTS` | off | `1` = never spend Odds API credits this run (free data only) |
+| `FORCE_ODDS_PULL` | off | `1` = pull even if pulled recently or already this week (still blocked by `NO_PAID_REQUESTS`) |
+| `PARLAY_ONLY` | `1` | Short output: only predictions logged, parlays and errors. `0` = the full board |
 
 ## Commands
 
@@ -175,6 +178,8 @@ Optional settings in `.env`:
 .venv/bin/python -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
 .venv/bin/python -m betbot.nfl.board                    # this week's verdicts from saved data (free)
 .venv/bin/python -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
+.venv/bin/python -m betbot.nfl.parlays --hunt           # plus-money (+150 to +400) legs with a 12%+ edge only (free)
+.venv/bin/python -m betbot.nfl.parlays --hunt --min-conv 0.15 --min-price 150 --max-price 400 --legs 3
 .venv/bin/python -m betbot.nfl.grader                   # grade finished picks (free)
 .venv/bin/python -m betbot.nfl.backtest                 # hit rate, calibration, Brier, CLV on past games (free)
 .venv/bin/python -m pytest                              # tests (fake data, no internet, no credits)

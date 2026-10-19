@@ -112,3 +112,18 @@ def test_unpublished_injury_file_does_not_block_the_update(monkeypatch):
     nflverse.load(conn)
     assert conn.execute("SELECT count(*) FROM nfl_player_weeks WHERE season = 2026").fetchone() == (1,)
     assert conn.execute("SELECT gsis_id FROM nfl_injury_reports").fetchall() == [("x",)]  # kept as is
+
+
+def test_snap_reload_waits_24_hours_for_a_game_that_never_posts():
+    from datetime import datetime, timezone
+    conn = db.connect(":memory:")
+    replace_table(conn, "nfl_games", ["game_id", "gameday"], [["g1", "2026-10-11"]])
+    replace_table(conn, "nfl_player_weeks", ["game_id"], [["g1"]])
+    replace_table(conn, "nfl_snap_counts", ["game_id"], [["other"]])  # g1's snaps never posted
+    replace_table(conn, "nfl_players", ["gsis_id"], [])
+    replace_table(conn, "nfl_injury_reports", ["gsis_id"], [])
+    now = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+    assert is_stale(conn, "2026-10-17", now)                       # never fully loaded: reload
+    db.record_pull(conn, "nflverse_load", "", "2026-10-17T06:00:00+00:00")
+    assert not is_stale(conn, "2026-10-17", now)                    # loaded 6 hours ago: don't reload again
+    assert is_stale(conn, "2026-10-19", datetime(2026, 10, 19, 12, tzinfo=timezone.utc))  # a day+ later: once more

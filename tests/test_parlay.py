@@ -35,3 +35,13 @@ def test_build_keeps_positive_ev_skips_conflicts():
     assert ["A over", "A under"] not in labels  # both sides of one bet
     assert all(r["ev"] > 0 for r in results)
     assert not any("C" in l for ls in labels for l in ls)  # a 30% leg drags every parlay negative
+
+
+
+def test_conviction_ranking_prefers_edge_then_payout():
+    legs = [leg("A", 0.62, game="g1"), leg("B", 0.60, game="g2"), leg("C", 0.45, 150, game="g3")]
+    by_ev = parlay.build(legs, lambda x, y: 0.0, lambda x, y: False, max_legs=2, rank="ev")
+    by_conv = parlay.build(legs, lambda x, y: 0.0, lambda x, y: False, max_legs=2, rank="conviction")
+    assert all(r["conviction"] == r["true_prob"] - 1 / r["decimal"] for r in by_conv)
+    assert [r["conviction"] for r in by_conv] == sorted((r["conviction"] for r in by_conv), reverse=True)
+    assert {tuple(l["label"] for l in r["legs"]) for r in by_ev} == {tuple(l["label"] for l in r["legs"]) for r in by_conv}

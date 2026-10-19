@@ -140,3 +140,15 @@ def test_unverifiable_pick_is_marked_unverified_once_the_game_is_a_week_old():
     assert row(conn, "result") == [(None,)]  # 4 days on: still waiting (the grader's clock, not the wall clock)
     grader.grade(conn, now="2026-10-20T00:00:00+00:00")
     assert row(conn, "result") == [("unverified",)]  # not a win, loss or void: left out of the record
+
+
+def test_unverified_picks_are_not_recounted_every_run():
+    conn = make_db(gameday="2026-10-01")
+    predictions.log_props(conn, [dict(prop(), player_id="rookie", player="R Ookie")])
+    assert grader.grade(conn, now="2026-10-20T00:00:00+00:00") == 0   # marked unverified: still open, not counted
+    assert grader.grade(conn, now="2026-10-21T00:00:00+00:00") == 0   # still can't tell: left alone
+    replace_table(conn, "nfl_players", ["gsis_id", "pfr_id"], [["rookie", "PfrRookie"], ["starter", "PfrStarter"]])
+    replace_table(conn, "nfl_snap_counts", ["game_id", "pfr_player_id", "offense_snaps", "st_snaps"],
+                  [["g1", "PfrStarter", 60, 0]])
+    assert grader.grade(conn, now="2026-10-22T00:00:00+00:00") == 1   # snaps arrive: settled as a void
+    assert row(conn, "result") == [("void",)]
