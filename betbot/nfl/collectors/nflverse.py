@@ -18,6 +18,19 @@ SNAP_COUNTS_URL = "https://github.com/nflverse/nflverse-data/releases/download/s
 PLAYER_WEEK_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{}.csv"
 
 
+# nflverse's schedule keeps the codes teams had at the time; its stats and snap counts use today's. Joining needs one set.
+OLD_TEAM_CODES = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
+
+
+def modern_team_codes(header, rows):
+    """Rewrites OAK / SD / STL in the schedule's home_team and away_team columns to LV / LAC / LA (in place)."""
+    columns = [header.index(c) for c in ("home_team", "away_team") if c in header]
+    for row in rows:
+        for i in columns:
+            row[i] = OLD_TEAM_CODES.get(row[i], row[i])
+    return rows
+
+
 def _value(s):
     if s == "":
         return None
@@ -103,6 +116,7 @@ def load(conn, first_season=None):
     and each table's full history otherwise. Games and the player ID table are re-downloaded whole every time."""
     first_season = first_season or current_season()
     header, games = _csv(GAMES_URL)
+    modern_team_codes(header, games)
     players_header, players = _csv(PLAYERS_URL)
     downloads = []
     for table, url, since, optional in SEASONAL:

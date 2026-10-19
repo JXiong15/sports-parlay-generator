@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from betbot import db
 from betbot.collectors import action_network, dk_network, odds_api
-from betbot.nfl import board, grader, parlays
+from betbot.nfl import board, conviction, grader, parlays
 from betbot.nfl.collectors import espn, kalshi, nflverse, weather
 
 
@@ -172,12 +172,18 @@ def collect():
             traceback.print_exc()  # a code bug shows up here with its traceback, not just one line
             return
         print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
-        if not parlay_only:
+        if not parlay_only:  # the full board and the EV-ranked parlays are for debugging
             board.print_board(picks)
+            try:
+                parlays.print_parlays(*parlays.build(conn, picks))
+            except Exception as e:
+                print(f"parlays failed: {e.__class__.__name__}: {e}")
+                traceback.print_exc()
         try:
-            parlays.print_parlays(*parlays.build(conn, picks))
+            # the default view: only props scoring 95+ with a hit rate that beats the book, and parlays from them
+            conviction.log_picks(conn, conviction.run(conn, picks))
         except Exception as e:
-            print(f"parlays failed: {e.__class__.__name__}: {e}")
+            print(f"conviction failed: {e.__class__.__name__}: {e}")
             traceback.print_exc()
 
 

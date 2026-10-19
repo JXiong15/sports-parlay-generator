@@ -3,6 +3,7 @@ import pandas as pd
 
 from betbot.nfl import model
 
+NO_FORM = pd.DataFrame(columns=model.FORM_COLUMNS)
 CTX_COLS = ["game_id", "team", "home", "implied_points", "spread", "wind", "temp"]
 
 
@@ -28,7 +29,7 @@ def build(df, ctx, upcoming=None):
     empty_teams = pd.DataFrame(columns=["season", "week", "team", "qb_out", "def_starters_out"])
     no_snaps = pd.DataFrame(columns=["player_id", "season", "week", "offense_pct"])
     return model.features(None, "passing_yards", ("QB",), upcoming, df=df, context=ctx, flags=empty_flags,
-                          absences=empty_teams, snaps=no_snaps)
+                          absences=empty_teams, snaps=no_snaps, form=NO_FORM)
 
 
 def test_features_only_use_earlier_games():
@@ -112,7 +113,7 @@ def test_upcoming_row_gets_snap_share_from_previous_games():
     empty_teams = pd.DataFrame(columns=["season", "week", "team", "qb_out", "def_starters_out"])
     try:
         out = model.features(FakeConn(), "passing_yards", ("QB",), up, df=df, context=ctx, flags=empty_flags,
-                             absences=empty_teams).set_index("game_id")
+                             absences=empty_teams, form=NO_FORM).set_index("game_id")
     finally:
         m.pd.read_sql_query = orig
     assert abs(out.loc["next", "snap_pct"] - 0.9) < 1e-9 and out.loc["next", "starter_flag"] == 1.0  # not 0
@@ -143,7 +144,7 @@ def test_player_without_snap_history_gets_last_seasons_typical_share_not_zero():
     empty_flags = pd.DataFrame(columns=["season", "week", "player_id", "questionable", "limited_practice", "status"])
     empty_teams = pd.DataFrame(columns=["season", "week", "team", "qb_out", "def_starters_out"])
     out = model.features(None, "passing_yards", ("QB",), df=df, context=ctx, flags=empty_flags, absences=empty_teams,
-                         snaps=snaps)
+                         snaps=snaps, form=NO_FORM)
     p1_2020 = out[(out["player_id"] == "p1") & (out["season"] == 2020)]
     assert (abs(p1_2020["snap_pct"] - 0.9) < 1e-9).all() and (p1_2020["starter_flag"] == 1.0).all()
     # in the first season there is no earlier data to use, so the neutral 0.5 (never a 0)

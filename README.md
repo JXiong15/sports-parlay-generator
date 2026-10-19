@@ -31,6 +31,42 @@ parlays. Pieces can also be run on their own (see Commands).
 > closing line, where 52.4% breaks even at -110, with coin-flip accuracy. Player props on 6 weeks of real
 > DraftKings lines hit 52.6% after recalibration, i.e. break-even. Treat every pick as research, not a likely winner.
 
+## The conviction score (what a run prints by default)
+
+A run prints only props that reach a **conviction score of 95+** and clear a hit-rate test, plus parlays built from them.
+If none qualify it says `No picks at score 95+ today (N props checked)`. The bar is never lowered.
+
+The score is **not a probability.** It measures how many independent signals agree on Over or Under, and how strongly.
+Each signal is rated from -1 to +1 toward the Over:
+
+| Signal | What it looks at |
+|---|---|
+| script | an underdog, a team that has been losing, a team that throws a lot: more passing, less rushing |
+| volume | his last 3 games vs. the line |
+| stale line | the line still sits at last season's average while his recent games say otherwise |
+| matchup | what the opposing defense allows to his position |
+| usage | snap-share trend, starter or backup |
+| health | questionable, limited in practice, his QB out, opposing starters out |
+| weather | wind and cold |
+| model | the player model's own probability |
+
+Agreement minus twice the disagreement becomes a 0-100 score by its **percentile** among about 320,000 past props
+(2019-2025), so 95 means "more agreement than 95% of all props ever scored". Market signals (sharp money against
+us, a line that moved against us, a prediction market that disagrees) can only pull a score down, by up to 15.
+
+A pick is shown only if all of these hold, and prints player, prop, line, side, book, price, score, historical hit
+rate with its sample size, the book's no-vig %, EV per $100 and a one-line reason:
+1. score 95 or higher;
+2. at least 30 props in the 95+ range on **real DraftKings lines** (this season), so the hit rate is measured, not assumed;
+3. that hit rate beats the book's no-vig price (positive EV).
+
+Parlays use the measured hit rates (not the scores) with same-game correlation, and are sorted by EV.
+Rebuild the tables with `.venv/bin/python -m betbot.nfl.conviction --build` (done automatically when a new week arrives).
+
+**Honest status:** the stand-in lines used for the 2019-2025 history are slow averages, softer than a real book's, so
+that history overstates hit rates (95+ hits 78% there). On real lines the score only separates at the very top
+(scores of 90+ hit 76% on 21 props; everything below about 90 hit 50-55%), and only 7 props have reached 95 so far.
+
 ## How it decides
 
 1. **Player model** (`nfl/model.py`): a recency-weighted average of the player's earlier games, adjusted for the
@@ -160,7 +196,7 @@ Optional settings in `.env`:
 | `ODDS_REFRESH_HOURS` | `2` | Paid Odds API requests made within this many hours are skipped, so re-running costs nothing |
 | `NO_PAID_REQUESTS` | off | `1` = never spend Odds API credits this run (free data only) |
 | `FORCE_ODDS_PULL` | off | `1` = pull even if pulled recently or already this week (still blocked by `NO_PAID_REQUESTS`) |
-| `PARLAY_ONLY` | `1` | Short output: only predictions logged, parlays and errors. `0` = the full board |
+| `PARLAY_ONLY` | `1` | Short output (default): the conviction picks, their parlays and any errors. `0` also prints the full board and the EV-ranked parlays |
 
 ## Commands
 
@@ -178,6 +214,8 @@ Optional settings in `.env`:
 .venv/bin/python -m betbot.nfl.collectors.archive_splits  # import past game splits from the Internet Archive (free; re-runs skip done copies)
 .venv/bin/python -m betbot.nfl.board                    # this week's verdicts from saved data (free)
 .venv/bin/python -m betbot.nfl.parlays                  # positive-EV parlays with same-game correlation (free)
+.venv/bin/python -m betbot.nfl.conviction --build       # rebuild the conviction score tables and hit rates (free, ~40 s)
+.venv/bin/python -m betbot.nfl.conviction --player "Tyler Shough" --weeks 1-5   # a player's score week by week (free)
 .venv/bin/python -m betbot.nfl.parlays --hunt           # plus-money (+150 to +400) legs with a 12%+ edge only (free)
 .venv/bin/python -m betbot.nfl.parlays --hunt --min-conv 0.15 --min-price 150 --max-price 400 --legs 3
 .venv/bin/python -m betbot.nfl.grader                   # grade finished picks (free)
@@ -218,6 +256,7 @@ betbot/
     model.py                   player stat model and P(Over)
     game_model.py              team ratings, P(cover / over / win)
     board.py                   this week's picks and verdicts
+    conviction.py              conviction score, hit-rate tables, 95+ picks and their parlays
     parlays.py, correlation.py parlays and same-game correlations
     grader.py, backtest.py     grading and backtests
     signals/regression.py      "chasing yesterday" picks

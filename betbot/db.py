@@ -214,7 +214,8 @@ MIGRATIONS = {
     "nfl_game_lines": [f"{k}_{c} INTEGER" for k in ("open", "current", "close") for c in (
         "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
-    "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
+    # clv_points: our line minus the closing line, from our side (points / yards); conviction: a shown pick's 0-100 score
+    "predictions": ["clv_points REAL", "conviction REAL"],
     "kalshi_markets": ["seen_at TEXT"],  # last run that saw this price still listed
     "lines": ["seen_at TEXT"],           # last Odds API pull that still listed this line
     "game_odds": ["seen_at TEXT"],
@@ -333,20 +334,29 @@ def save_archive_splits(conn, rows):
 
 
 PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "player_id", "market", "side", "line",
-                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu")
+                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu",
+                      "conviction")
 
 
 def save_predictions(conn, rows):
     """Keeps the first logging of each prop or game market (same game, player and market, whichever book), compared
     with IS so empty values still match."""
     cols = ", ".join(PREDICTION_COLUMNS)
-    # one pick per prop or game market: a later run whose favored side or line changed isn't a second bet
-    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market"))
-    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
-                           f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
-                           f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
-                           [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
-    return cur.rowcount
+    saved = 0
+    # board picks are one per market (a flipped side is the same bet). A pick SHOWN to the user (kind 'conviction') is
+    # logged as shown: a different side, line or book on a later run is its own pick, so grading describes what was seen
+    for shown in (False, True):
+        batch = [r for r in rows if (r.get("kind") == "conviction") == shown]
+        if not batch:
+            continue
+        keys = ("kind", "game_id", "player_id", "market") + (("side", "line", "book") if shown else ())
+        same = " AND ".join(f"{c} IS :{c}" for c in keys)
+        cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
+                               f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
+                               f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
+                               [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in batch])
+        saved += cur.rowcount
+    return saved
 
 
 KALSHI_COLUMNS = ("ticker", "series", "event_ticker", "market", "subject", "strike", "game_date", "away", "home",

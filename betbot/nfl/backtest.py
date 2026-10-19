@@ -114,10 +114,12 @@ def game_clv(conn, g):
 
 # ---------- props ----------
 
-def _features(conn, stat, positions, cache):
+def cached_features(conn, stat, positions, cache):
     key = (stat, positions)
     if key not in cache:
-        cache[key] = model.features(conn, stat, positions)
+        if "form" not in cache:
+            cache["form"] = model.team_form(conn)  # the same for every stat
+        cache[key] = model.features(conn, stat, positions, form=cache["form"])
     return cache[key]
 
 
@@ -132,7 +134,7 @@ def props_real(conn, cache=None):
         lm = lines[lines["prop_type"] == market.replace("player_", "")]
         if lm.empty:
             continue
-        df = _features(conn, stat, positions, cache)
+        df = cached_features(conn, stat, positions, cache)
         names = df.assign(key=df["player"].map(normalize)).groupby("key")["player_id"].agg(set)
         for (season, week), wk in lm.groupby(["season", "week"]):
             train = df[(df["season"] < season) | ((df["season"] == season) & (df["week"] < week))]
@@ -184,7 +186,7 @@ def calibration(conn, stats=("passing_yards", "rushing_yards", "receiving_yards"
     positions_for = {s: MARKETS[m][1] for m, (s, _) in MARKETS.items()}
     out = {}
     for stat in stats:
-        df = _features(conn, stat, positions_for[stat], cache)
+        df = cached_features(conn, stat, positions_for[stat], cache)
         ps, wins = [], []
         for season in seasons:
             train = df[df["season"] < season]

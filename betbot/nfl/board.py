@@ -57,7 +57,8 @@ def prop_picks(conn, now=None, prices=None):
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
     flags = model.injury_flags(conn)
-    shared = {"context": model.game_context(conn), "flags": flags, "snaps": model.snap_shares(conn),  # built once
+    shared = {"context": model.game_context(conn), "flags": flags, "snaps": model.snap_shares(conn),
+              "form": model.team_form(conn),  # built once
               "absences": model.team_absences(conn, flags, _upcoming_team_weeks(conn, now))}
     prices = prices or kalshi.Prices(conn, now)
     out = []
