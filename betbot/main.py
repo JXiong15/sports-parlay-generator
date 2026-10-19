@@ -175,7 +175,9 @@ def collect():
         if not parlay_only:  # the full board and the EV-ranked parlays are for debugging
             board.print_board(picks)
             try:
-                parlays.print_parlays(*parlays.build(conn, picks))
+                results, available = parlays.build(conn, picks, max_legs=2)
+                parlays.print_parlays(results, available)
+                parlays.log(conn, results)
             except Exception as e:
                 print(f"parlays failed: {e.__class__.__name__}: {e}")
                 traceback.print_exc()

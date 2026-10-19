@@ -323,3 +323,25 @@ def test_team_form_warns_when_its_tables_are_missing():
     from betbot.nfl import model
     with pytest.warns(RuntimeWarning, match="team form unavailable"):
         model.team_form(db.connect(":memory:"))
+
+
+def test_parlay_log_and_record_settle_from_leg_results():
+    from betbot.nfl import parlays
+    conn = db.connect(":memory:")
+    def leg(player, side="Over"):
+        return dict(game="g1", player_id=player, market="player_pass_yds", side=side, line=240.5)
+    def pred(player, result, side="Over"):
+        return dict(kind="prop", made_at="t", game_id="g1", event_id="e", player="x", player_id=player,
+                    market="player_pass_yds", side=side, line=240.5, price=-110, other_price=-110, book="dk",
+                    model_prob=0.55, implied_prob=0.5, vig_removed=1, p_over=None, mu=None, conviction=None,
+                    result=result)
+    result = lambda *legs: {"true_prob": 0.3, "price": 260, "legs": list(legs)}
+    assert parlays.log(conn, [result(leg("a"), leg("b")), result(leg("c"), leg("d"))]) == 2
+    assert parlays.log(conn, [result(leg("b"), leg("a"))]) == 0                    # same legs: kept once
+    db.save_predictions(conn, [pred("a", None), pred("b", None), pred("c", None), pred("d", None)])
+    assert parlays.record(conn)[0] == 0                                            # nothing graded: open
+    for pid, res in (("a", "win"), ("b", "loss"), ("c", "win")):
+        conn.execute("UPDATE predictions SET result = ? WHERE player_id = ?", (res, pid))
+    assert parlays.record(conn) == (1, 0, 0.3)                                     # a+b lost; c+d still waiting on d
+    conn.execute("UPDATE predictions SET result = 'win' WHERE player_id = 'd'")
+    assert parlays.record(conn) == (2, 1, 0.3)

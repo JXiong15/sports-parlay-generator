@@ -34,6 +34,7 @@ def test_legs_and_conflicts():
               "game_id": "2026_06_DAL_GB", "side": "over", "market": "total", "kind": "game"}]
     legs = parlays.legs(picks)
     assert len(legs) == 1 and legs[0]["home"] == "GB" and legs[0]["away"] == "DAL"
+    assert abs(legs[0]["prob"] - 0.54) < 1e-9          # the model's 56% halfway back to the book's 52%
     assert parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "away") | {"game": "g"})
     assert not parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "home") | {"game": "g"})
     assert parlays.conflicts(prop(), prop("Under") | {"market": "player_x"})
@@ -58,20 +59,20 @@ def game_pick(home_prob, home_price=200, away_price=-250, **extra):
 def test_hunt_keeps_plus_money_high_edge_sides_only():
     # +200 at 40%: no-vig price ~31%, edge ~9 points -> not enough at 12
     assert parlays.hunt_legs([game_pick(0.40)], min_conv=0.12) == []
-    # at 48% the edge is ~17 points: kept, even though the board's pick is the other side
-    legs = parlays.hunt_legs([game_pick(0.48)], min_conv=0.12)
-    assert len(legs) == 1 and legs[0]["price"] == 200 and legs[0]["edge"] > 0.15
+    # at 60% the edge is ~29 points, ~14 after halving it for parlays: kept, even though the board's pick is the other side
+    legs = parlays.hunt_legs([game_pick(0.60)], min_conv=0.12)
+    assert len(legs) == 1 and legs[0]["price"] == 200 and legs[0]["edge"] > 0.12
     # outside +150..+400 is dropped, however big the edge
-    assert parlays.hunt_legs([game_pick(0.48, 450, -600)]) == []
+    assert parlays.hunt_legs([game_pick(0.60, 450, -600)]) == []
     assert parlays.hunt_legs([game_pick(0.70, -110, -110)]) == []
 
 
 def test_hunt_leg_names_the_side_actually_bet():
-    legs = parlays.hunt_legs([game_pick(0.48)], min_conv=0.12)
+    legs = parlays.hunt_legs([game_pick(0.60)], min_conv=0.12)
     assert legs[0]["side"] == "home" and legs[0]["label"] == "DAL @ GB: Green Bay Packers ML"
 
 
 def test_hunt_still_applies_market_checks():
     # sharp money on the other side: 70% of the money vs 30% of the bets -> STAY AWAY, so no leg
-    legs = parlays.hunt_legs([game_pick(0.48, bets_pct=70, money_pct=30)], min_conv=0.12)
+    legs = parlays.hunt_legs([game_pick(0.60, bets_pct=70, money_pct=30)], min_conv=0.12)
     assert legs == []

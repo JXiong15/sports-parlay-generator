@@ -149,6 +149,14 @@ CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row 
     params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
     fitted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS parlays (  -- every parlay shown: its legs as made; graded from the predictions table
+    id INTEGER PRIMARY KEY,
+    made_at TEXT NOT NULL,
+    legs TEXT NOT NULL,           -- JSON: [game_id, player_id, market, side, line] per leg
+    true_prob REAL NOT NULL,
+    price INTEGER NOT NULL,
+    UNIQUE (legs)
+);
 CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded after the game
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,           -- prop / game
@@ -347,6 +355,13 @@ def save_predictions(conn, rows):
                            f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
                            f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
                            [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount
+
+
+def save_parlays(conn, rows):
+    """rows: dicts with made_at, legs (JSON text), true_prob, price. The same legs are kept once (first shown)."""
+    cur = conn.executemany("INSERT OR IGNORE INTO parlays (made_at, legs, true_prob, price)"
+                           " VALUES (:made_at, :legs, :true_prob, :price)", rows)
     return cur.rowcount
 
 

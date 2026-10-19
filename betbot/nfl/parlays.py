@@ -7,20 +7,27 @@ and true combined probability and EV (betbot/parlay.py). Two modes:
            side still passes decision.py's market checks. Ranked by combined conviction, then payout.
 """
 import argparse
+import json
 import os
+from datetime import datetime, timezone
 
 from betbot import db, decision, parlay
 from betbot.nfl import board, correlation
+from betbot.odds import decimal_odds
 from betbot.nfl.signals.regression import MARKETS
 
 MIN_PRICE, MAX_PRICE, MIN_CONV = 150, 400, 0.12  # hunt defaults: +150 to +400, a 12-point edge
+SHRINK = 0.5   # parlay legs trust the model only this far from the book's no-vig price (it has been overconfident)
 
 
 def _leg(p, s):
     """A parlay leg from board pick p and one of its sides s."""
     d = s["decision"]
-    leg = {"label": s["label"], "prob": s["model_prob"], "price": s["price"], "ev": d["ev"], "edge": d["edge"],
-           "game": p["game_id"], "side": s["side"], "market": p["market"]}
+    fair = s["model_prob"] - d["edge"]
+    prob = fair + SHRINK * d["edge"]
+    leg = {"label": s["label"], "prob": prob, "price": s["price"], "ev": prob * decimal_odds(s["price"]) - 1,
+           "edge": prob - fair, "game": p["game_id"], "side": s["side"], "market": p["market"],
+           "line": p.get("line")}
     if p.get("kind") == "game":
         away, home = p["game_id"].split("_")[2:4]
         leg.update(kind="game", home=home, away=away)
@@ -31,7 +38,8 @@ def _leg(p, s):
 
 def legs(picks):
     """The board's positive-EV BET / FADE picks (the side the model favors) as parlay legs."""
-    return [_leg(p, p) for p in picks if p["decision"]["verdict"] in ("BET", "FADE") and p["decision"]["ev"] > 0]
+    out = [_leg(p, p) for p in picks if p["decision"]["verdict"] in ("BET", "FADE")]
+    return [leg for leg in out if leg["ev"] > 0]
 
 
 def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV):
@@ -41,10 +49,9 @@ def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV
     for p in picks:
         for s in p.get("sides", [p]):
             d = s.get("decision")
-            if (d and s["price"] is not None and min_price <= s["price"] <= max_price and d["edge"] >= min_conv
-                    and d["verdict"] in ("BET", "FADE")):
+            if d and s["price"] is not None and min_price <= s["price"] <= max_price and d["verdict"] in ("BET", "FADE"):
                 out.append(_leg(p, s))
-    return out
+    return [leg for leg in out if leg["edge"] >= min_conv]
 
 
 def conflicts(a, b):
@@ -71,6 +78,43 @@ def build(conn, picks=None, max_legs=3, top=10, hunt=False, min_price=MIN_PRICE,
     return results, available
 
 
+def log(conn, results):
+    """Saves each parlay shown (once per set of legs) so its result can be checked against its predicted chance."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = [{"made_at": now, "true_prob": r["true_prob"], "price": r["price"],
+             "legs": json.dumps(sorted([l["game"], l.get("player_id"), l["market"], l["side"], l.get("line")]
+                                       for l in r["legs"]), sort_keys=True)} for r in results]
+    with conn:
+        return db.save_parlays(conn, rows)
+
+
+def record(conn):
+    """Settled parlays vs what we predicted: (settled, won, average predicted chance). A parlay loses when any leg
+    lost, wins when every leg won, and stays open while a leg is ungraded or can't be found (pushes void a leg)."""
+    settled = won = 0
+    chance = 0.0
+    for legs, prob in conn.execute("SELECT legs, true_prob FROM parlays"):
+        results = []
+        for game, player, market, side, line in json.loads(legs):
+            row = conn.execute("SELECT result FROM predictions WHERE game_id = ? AND player_id IS ? AND market = ?"
+                               " AND side = ? AND line IS ? AND result IS NOT NULL LIMIT 1",
+                               (game, player, market, side, line)).fetchone()
+            results.append(row[0] if row else None)
+        if "loss" in results or (None not in results and "win" in results):
+            settled += 1
+            won += "loss" not in results
+            chance += prob
+    return settled, won, chance / settled if settled else None
+
+
+def print_record(conn):
+    settled, won, chance = record(conn)
+    if settled:
+        print(f"Parlays shown and settled: {won}/{settled} won; we predicted {chance:.0%} on average")
+    else:
+        print("No parlays settled yet.")
+
+
 def print_parlays(results, available, hunt=False, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV):
     print(decision.NO_EDGE_WARNING)
     if hunt:
@@ -95,12 +139,17 @@ def main(argv=None):
     ap.add_argument("--min-price", type=int, default=MIN_PRICE)
     ap.add_argument("--max-price", type=int, default=MAX_PRICE)
     ap.add_argument("--min-conv", type=float, default=MIN_CONV, help="minimum edge over the no-vig price, e.g. 0.15")
-    ap.add_argument("--legs", type=int, default=3, help="most legs per parlay")
+    ap.add_argument("--legs", type=int, default=2, help="most legs per parlay (fewer legs hit more often)")
+    ap.add_argument("--record", action="store_true", help="show settled parlays vs predicted chance, then exit")
     args = ap.parse_args(argv)
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
+    if args.record:
+        return print_record(conn)
     results, available = build(conn, max_legs=args.legs, hunt=args.hunt, min_price=args.min_price,
                                max_price=args.max_price, min_conv=args.min_conv)
     print_parlays(results, available, args.hunt, args.min_price, args.max_price, args.min_conv)
+    log(conn, results)
+    print_record(conn)
 
 
 if __name__ == "__main__":

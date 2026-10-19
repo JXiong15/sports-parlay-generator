@@ -432,7 +432,7 @@ def parlay_legs(picks):
     return [{"label": f"{p['player']} {p['side']} {p['line']:g} {p['market'].replace('player_', '')}",
              "prob": p["hit"], "price": p["price"], "ev": expected_value(p["hit"], p["price"]),
              "edge": p["hit"] - p["fair"], "game": p["game_id"], "side": p["side"], "market": p["market"],
-             "kind": "prop", "stat": p["stat"], "player_id": p["player_id"], "team": p["team"]} for p in picks]
+             "kind": "prop", "line": p["line"], "stat": p["stat"], "player_id": p["player_id"], "team": p["team"]} for p in picks]
 
 
 def parlays_for(conn, picks, max_legs=3, top=10):
@@ -475,12 +475,15 @@ def print_report(picks, checked, parlay_results, tables):
             print(f"    {leg['label']} ({leg['price']:+d}, hits {leg['prob']:.0%})")
 
 
-def run(conn, picks, max_legs=3):
+def run(conn, picks, max_legs=2):
     """Score the board's picks and print the 95+ ones with parlays. Returns the qualifying picks."""
     tables = ensure_tables(conn)
     scored = score_picks(picks, tables)
     chosen = select(scored, tables)
-    print_report(chosen, len(scored), parlays_for(conn, chosen, max_legs), tables)
+    results = parlays_for(conn, chosen, max_legs)
+    print_report(chosen, len(scored), results, tables)
+    from betbot.nfl import parlays
+    parlays.log(conn, results)
     return chosen
 
 
