@@ -18,6 +18,19 @@ SNAP_COUNTS_URL = "https://github.com/nflverse/nflverse-data/releases/download/s
 PLAYER_WEEK_URL = "https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{}.csv"
 
 
+# nflverse's schedule keeps the codes teams had at the time; its stats and snap counts use today's. Joining needs one set.
+OLD_TEAM_CODES = {"OAK": "LV", "SD": "LAC", "STL": "LA"}
+
+
+def modern_team_codes(header, rows):
+    """Rewrites OAK / SD / STL in the schedule's home_team and away_team columns to LV / LAC / LA (in place)."""
+    columns = [header.index(c) for c in ("home_team", "away_team") if c in header]
+    for row in rows:
+        for i in columns:
+            row[i] = OLD_TEAM_CODES.get(row[i], row[i])
+    return rows
+
+
 def _value(s):
     if s == "":
         return None
@@ -103,6 +116,7 @@ def load(conn, first_season=None):
     and each table's full history otherwise. Games and the player ID table are re-downloaded whole every time."""
     first_season = first_season or current_season()
     header, games = _csv(GAMES_URL)
+    modern_team_codes(header, games)
     players_header, players = _csv(PLAYERS_URL)
     downloads = []
     for table, url, since, optional in SEASONAL:
@@ -146,8 +160,9 @@ def update_practice_reports(conn):
                 _insert(conn, "nfl_injury_reports", header, rows)
 
 
-def is_stale(conn, today=None):
-    """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats."""
+def is_stale(conn, today=None, now=None):
+    """True if a game from the last month (older than 2 days, so nflverse has posted it) has no player stats, or no
+    snap counts and the last full load was 24+ hours ago. today / now default to the real date and clock."""
     today = today or date.today().isoformat()
     try:
         for table in ("nfl_snap_counts", "nfl_players", "nfl_injury_reports"):
@@ -159,9 +174,8 @@ def is_stale(conn, today=None):
         missing_snaps = conn.execute(
             "SELECT EXISTS (SELECT 1 FROM nfl_games WHERE gameday BETWEEN date(?, '-30 days') AND date(?, '-2 days')"
             " AND game_id NOT IN (SELECT game_id FROM nfl_snap_counts))", (today, today)).fetchone()[0]
-        last_load = conn.execute("SELECT max(fetched_at) FROM odds_pulls WHERE kind = 'nflverse_load'").fetchone()[0]
-        recent = last_load is not None and last_load[:10] >= today
-        return bool(missing_stats) or (bool(missing_snaps) and not recent)
+        hours = db.hours_since_pull(conn, "nflverse_load", "", now or datetime.now(timezone.utc))
+        return bool(missing_stats) or (bool(missing_snaps) and (hours is None or hours >= 24))
     except sqlite3.OperationalError:  # history never loaded
         return True
 

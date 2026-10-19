@@ -112,7 +112,7 @@ def test_book_prices_and_game_matched(no_model):
 
 def test_add_probabilities_attaches_p_over(monkeypatch):
     params = {"z_quantiles": list(np.linspace(-3, 3, 401))}
-    monkeypatch.setattr(model, "fitted", lambda conn, stat, pos: params)
+    monkeypatch.setattr(model, "fitted", lambda conn, stat, pos, df=None: params)
     monkeypatch.setattr(model, "features", lambda conn, stat, pos, up, **kw: up.assign(y=np.nan))
     monkeypatch.setattr(model, "predict", lambda df, p: df.assign(mu=250.0, sigma=25.0))
     results = [{"player_id": "q", "game_id": "g", "line": 250.5}, {"player_id": "x", "game_id": None, "line": 1}]

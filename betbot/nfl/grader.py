@@ -68,7 +68,8 @@ def grade_prop(conn, p, now=None):
         # nflverse leaves out players who played but recorded nothing; snap counts show who actually played
         played = _played(conn, p["player_id"], p["game_id"])
         if played is None:
-            old = conn.execute("SELECT julianday(?) - julianday(gameday) > 7 FROM nfl_games WHERE game_id = ?",
+            # gameday is a local date and now is UTC: 8 days leaves a full week after any kickoff
+            old = conn.execute("SELECT julianday(?) - julianday(gameday) > 8 FROM nfl_games WHERE game_id = ?",
                                (now or datetime.now(timezone.utc).isoformat(), p["game_id"])).fetchone()
             if not (old and old[0]):
                 return None  # can't tell yet: grade on a later run
@@ -132,31 +133,36 @@ def grade_game(conn, p, g):
 
 
 def grade(conn, now=None):
-    """Grades every ungraded pick whose game has a final score. Returns how many were graded."""
+    """Grades every open pick (not yet graded, or marked unverified) whose game has a final score. Returns how many
+    were settled (win / loss / push / void); picks that can't be verified yet stay open and aren't counted."""
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     cols = [r[1] for r in conn.execute("PRAGMA table_info(predictions)")]
     game_cols = ["game_id", "home_score", "away_score", "spread_line", "total_line", "home_spread_odds",
                  "away_spread_odds", "over_odds", "under_odds", "home_moneyline", "away_moneyline"]
     done = 0
-    for values in conn.execute("SELECT * FROM predictions WHERE graded_at IS NULL").fetchall():
+    for values in conn.execute("SELECT * FROM predictions WHERE graded_at IS NULL").fetchall():  # includes unverified
         p = dict(zip(cols, values))
         g = conn.execute(f"SELECT {', '.join(game_cols)} FROM nfl_games WHERE game_id = ?", (p["game_id"],)).fetchone()
         if g is None or g[1] is None:
             continue  # not played yet
         g = dict(zip(game_cols, g))
-        graded = grade_prop(conn, p, now) if p["kind"] == "prop" else grade_game(conn, p, g)
+        graded = grade_prop(conn, p, now) if p["kind"] in ("prop", "conviction") else grade_game(conn, p, g)
         if graded is None:
             continue  # stats not posted yet
+        if graded["result"] == "unverified" and p["result"] == "unverified":
+            continue  # still can't tell: don't rewrite it or count it as newly graded every run
         if "closing_line" in graded:
             graded["clv_points"] = _clv_points(p, graded["closing_line"])
             # the no-vig probabilities are only comparable at the same line
             if graded.get("closing_implied") is not None and graded["closing_line"] == p["line"]:
                 graded["clv"] = graded["closing_implied"] - p["implied_prob"]
-        graded["graded_at"] = now
+        if graded["result"] != "unverified":
+            graded["graded_at"] = now  # unverified stays open: later snap counts or ID links can still settle it
         with conn:
             conn.execute(f"UPDATE predictions SET {', '.join(k + ' = ?' for k in graded)} WHERE id = ?",
                          (*graded.values(), p["id"]))
-        done += 1
+        if graded["result"] != "unverified":
+            done += 1  # unverified picks are still open, so they don't count as graded
     return done
 
 

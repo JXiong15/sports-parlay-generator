@@ -114,25 +114,31 @@ def game_clv(conn, g):
 
 # ---------- props ----------
 
-def _features(conn, stat, positions, cache):
+def cached_features(conn, stat, positions, cache):
     key = (stat, positions)
     if key not in cache:
-        cache[key] = model.features(conn, stat, positions)
+        if "form" not in cache:
+            cache["form"] = model.team_form(conn)  # the same for every stat
+        cache[key] = model.features(conn, stat, positions, form=cache["form"])
     return cache[key]
 
 
-def props_real(conn, cache=None):
-    """DraftKings Network prop lines (full-game props the model covers), graded against actual stats."""
+def real_rows(conn, cache=None):
+    """Real DraftKings prop lines (DraftKings Network articles, plus EndzoneAPI history), graded against actual stats."""
     cache = {} if cache is None else cache
-    from betbot.nfl.prop_splits import dataframe
+    from betbot.nfl.prop_splits import dataframe, past_lines
     lines = dataframe(conn)
     lines = lines[lines["period"].isna() & lines["season"].notna()]
+    past = past_lines(conn)
+    key = ["season", "week", "who", "prop_type"]   # an article's line wins; EndzoneAPI fills the other weeks
+    lines, past = (f.assign(who=f["player"].map(normalize)) for f in (lines, past))
+    lines = pd.concat([lines, past[~past.set_index(key).index.isin(lines.set_index(key).index)]])
     rows = []
     for market, (stat, positions) in MARKETS.items():
         lm = lines[lines["prop_type"] == market.replace("player_", "")]
         if lm.empty:
             continue
-        df = _features(conn, stat, positions, cache)
+        df = cached_features(conn, stat, positions, cache)
         names = df.assign(key=df["player"].map(normalize)).groupby("key")["player_id"].agg(set)
         for (season, week), wk in lm.groupby(["season", "week"]):
             train = df[(df["season"] < season) | ((df["season"] == season) & (df["week"] < week))]
@@ -149,8 +155,14 @@ def props_real(conn, cache=None):
                 rows.append({"market": market, "season": season, "week": week, "player": r.player, "line": r.line,
                              "p_over": float(model.prob_over(params, t["mu"], t["sigma"], r.line)),
                              "over": int(t["y"] > r.line), "over_tickets": r.over_ticket_pct,
-                             "over_handle": r.over_handle_pct})
-    d = pd.DataFrame(rows)
+                             "over_handle": r.over_handle_pct, "mu": float(t["mu"]), "sigma": float(t["sigma"]),
+                             "base": float(t["base"])})
+    return pd.DataFrame(rows)
+
+
+def props_real(conn, cache=None):
+    """Hit rate, calibration and the stored real-line recalibration for the model on real lines."""
+    d = real_rows(conn, cache)
     if d.empty:
         return {"n": 0}
     # market lines are sharper than a player's own baseline: learn a second recalibration from real lines,
@@ -184,7 +196,7 @@ def calibration(conn, stats=("passing_yards", "rushing_yards", "receiving_yards"
     positions_for = {s: MARKETS[m][1] for m, (s, _) in MARKETS.items()}
     out = {}
     for stat in stats:
-        df = _features(conn, stat, positions_for[stat], cache)
+        df = cached_features(conn, stat, positions_for[stat], cache)
         ps, wins = [], []
         for season in seasons:
             train = df[df["season"] < season]

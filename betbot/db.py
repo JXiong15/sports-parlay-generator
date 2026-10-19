@@ -149,6 +149,35 @@ CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row 
     params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
     fitted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS endzone_lines (  -- historical DraftKings prop lines (EndzoneAPI), pulled once and kept
+    player_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    game_id TEXT NOT NULL,        -- nflverse game_id: season_week_away_home
+    game_date TEXT,
+    player_name TEXT,
+    line REAL,                    -- closing line
+    open_line REAL,
+    over_odds INTEGER,
+    under_odds INTEGER,
+    books INTEGER,
+    PRIMARY KEY (player_id, market, game_id)
+);
+CREATE TABLE IF NOT EXISTS endzone_pulled (  -- every player and market already asked for, empty answers included
+    player_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    bookmaker TEXT NOT NULL,
+    pulled_at TEXT NOT NULL,
+    games INTEGER NOT NULL,
+    PRIMARY KEY (player_id, market, bookmaker)
+);
+CREATE TABLE IF NOT EXISTS parlays (  -- every parlay shown: its legs as made; graded from the predictions table
+    id INTEGER PRIMARY KEY,
+    made_at TEXT NOT NULL,
+    legs TEXT NOT NULL,           -- JSON: [game_id, player_id, market, side, line] per leg
+    true_prob REAL NOT NULL,
+    price INTEGER NOT NULL,
+    UNIQUE (legs)
+);
 CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded after the game
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,           -- prop / game
@@ -214,7 +243,8 @@ MIGRATIONS = {
     "nfl_game_lines": [f"{k}_{c} INTEGER" for k in ("open", "current", "close") for c in (
         "over_price", "under_price", "home_spread_price", "away_spread_price", "home_ml", "away_ml")],
     "splits": ["price INTEGER"],  # DraftKings' American odds for that side
-    "predictions": ["clv_points REAL"],  # our line minus the closing line, from our side (points / yards)
+    # clv_points: our line minus the closing line, from our side (points / yards); conviction: a shown pick's 0-100 score
+    "predictions": ["clv_points REAL", "conviction REAL"],
     "kalshi_markets": ["seen_at TEXT"],  # last run that saw this price still listed
     "lines": ["seen_at TEXT"],           # last Odds API pull that still listed this line
     "game_odds": ["seen_at TEXT"],
@@ -333,19 +363,26 @@ def save_archive_splits(conn, rows):
 
 
 PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "player_id", "market", "side", "line",
-                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu")
+                      "price", "other_price", "book", "model_prob", "implied_prob", "vig_removed", "p_over", "mu",
+                      "conviction")
 
 
 def save_predictions(conn, rows):
-    """Keeps the first logging of each prop or game market (same game, player and market, whichever book), compared
-    with IS so empty values still match."""
+    """Keeps the first logging of each kind of pick per prop or game market (same game, player and market, whichever
+    book, side or line), compared with IS so empty values still match. A shown pick stays as first shown."""
     cols = ", ".join(PREDICTION_COLUMNS)
-    # one pick per prop or game market: a later run whose favored side or line changed isn't a second bet
     same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market"))
     cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
                            f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
                            f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
                            [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount
+
+
+def save_parlays(conn, rows):
+    """rows: dicts with made_at, legs (JSON text), true_prob, price. The same legs are kept once (first shown)."""
+    cur = conn.executemany("INSERT OR IGNORE INTO parlays (made_at, legs, true_prob, price)"
+                           " VALUES (:made_at, :legs, :true_prob, :price)", rows)
     return cur.rowcount
 
 

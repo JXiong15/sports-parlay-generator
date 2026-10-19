@@ -12,6 +12,8 @@ backtests without peeking.
 """
 import json
 import math
+import sqlite3
+import warnings
 from datetime import datetime, timezone
 
 import numpy as np
@@ -31,6 +33,7 @@ STATS = {
     "receiving_tds": ("target_share", 0.3),
 }
 FEATURES = ["def_vs_pos", "implied_points", "spread", "wind", "cold", "home", "usage_trend",
+            "snap_pct", "starter_flag",
             "questionable", "limited_practice", "qb_out", "opp_def_starters_out"]
 MISSING = ("Out", "Doubtful", "Injured Reserve")
 
@@ -118,8 +121,53 @@ def team_absences(conn, flags, upcoming=None):
 
 # ---------- features ----------
 
+def snap_shares(conn, first_season=FIRST_SEASON):
+    """Each player's offensive snap share per game (player, season, week, offense_pct); empty if snaps aren't loaded."""
+    cols = ["player_id", "season", "week", "offense_pct"]
+    try:
+        snaps = pd.read_sql_query("SELECT player_id, season, week, offense_pct FROM nfl_player_usage"
+                                  " WHERE season >= ? AND offense_pct IS NOT NULL", conn, params=(first_season,))
+    except (sqlite3.OperationalError, pd.errors.DatabaseError):  # snap counts not loaded
+        snaps = pd.DataFrame(columns=cols)
+    return snaps.drop_duplicates(["player_id", "season", "week"])
+
+
+LONG_HALFLIFE = 16  # games; the slow average that stands in for how a book's line lags a player's recent form
+FORM_COLUMNS = ["team", "season", "week", "margin3", "att3", "car3"]
+
+
+def no_form():
+    """An empty team_form with the right column types, so merging it into a frame is safe."""
+    return pd.DataFrame({"team": pd.Series(dtype=object), "season": pd.Series(dtype="int64"),
+                         "week": pd.Series(dtype="int64"), "margin3": pd.Series(dtype=float),
+                         "att3": pd.Series(dtype=float), "car3": pd.Series(dtype=float)})
+
+
+def team_form(conn, first_season=FIRST_SEASON):
+    """Per team and scheduled game: the team's margin, pass attempts and carries averaged over its previous 3
+    games (from the games before it only). Includes games not yet played, so upcoming games get their form."""
+    try:
+        games = pd.read_sql_query("SELECT game_id, season, week, home_team, away_team, home_score, away_score"
+                                  " FROM nfl_games WHERE season >= ?", conn, params=(first_season - 1,))
+        plays = pd.read_sql_query("SELECT team, game_id, sum(attempts) AS att, sum(carries) AS car"
+                                  " FROM nfl_player_weeks WHERE season >= ? GROUP BY team, game_id",
+                                  conn, params=(first_season - 1,))
+    except (sqlite3.OperationalError, pd.errors.DatabaseError) as e:
+        # without team form the "script" signal is missing and the conviction score can't be computed: say so
+        warnings.warn(f"team form unavailable ({e}); game-script signals will be empty", RuntimeWarning)
+        return no_form()
+    home = games.assign(team=games["home_team"], margin=games["home_score"] - games["away_score"])
+    away = games.assign(team=games["away_team"], margin=games["away_score"] - games["home_score"])
+    t = pd.concat([home, away])[["team", "game_id", "season", "week", "margin"]].merge(plays, how="left",
+                                                                                     on=["team", "game_id"])
+    t = t.sort_values(["team", "season", "week"])
+    for column, out in (("margin", "margin3"), ("att", "att3"), ("car", "car3")):
+        t[out] = t.groupby("team")[column].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    return t[FORM_COLUMNS]
+
+
 def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df=None, context=None, flags=None,
-             absences=None):
+             absences=None, snaps=None, form=None):
     """History rows (y known) plus optional upcoming rows (y NaN), each with features from earlier games only.
     upcoming: DataFrame with player_id, player, position_group, season, week, game_id, team, opponent_team."""
     df = history(conn, stat, positions, first_season) if df is None else df.copy()
@@ -133,12 +181,27 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
     df["usage_recent"] = by_player["usage"].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
     df["usage_ewm"] = by_player["usage"].transform(lambda s: s.shift(1).ewm(halflife=HALFLIFE, ignore_na=True).mean())
 
+    # recent offensive snap share (role): each game's share joined first, then shifted per player like every other
+    # feature, so an upcoming game gets the share from his previous games (joining already-shifted values left
+    # upcoming rows with none, i.e. every live prediction looked like a backup)
+    snaps = snap_shares(conn, first_season) if snaps is None else snaps
+    df = df.merge(snaps, how="left", on=["player_id", "season", "week"])
+    by_player = df.groupby("player_id")
+    df["snap_recent"] = by_player["offense_pct"].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    df["snap_ewm"] = by_player["offense_pct"].transform(lambda s: s.shift(1).ewm(halflife=HALFLIFE, ignore_na=True).mean())
+    # recent and slow-moving form of the stat itself (the conviction score compares them with the line)
+    df["y_recent3"] = by_player["y"].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+    df["y_long"] = by_player["y"].transform(lambda s: s.shift(1).ewm(halflife=LONG_HALFLIFE, ignore_na=True).mean())
+
     # previous season's average for the position (players with 4+ games), the shrink target
     played = df[df["y"].notna()]
     pos_season = played.groupby(["position_group", "season"])["y"].mean().rename("pos_mean").reset_index()
     pos_season["season"] += 1
     df = df.merge(pos_season, how="left", on=["position_group", "season"])
     df["pos_mean"] = df["pos_mean"].fillna(played["y"].mean() if len(played) else 0.0)
+    last_season = played.groupby(["player_id", "season"])["y"].mean().rename("y_prior_season").reset_index()
+    last_season["season"] += 1  # his average over the whole previous season
+    df = df.merge(last_season, how="left", on=["player_id", "season"])
     n = df["prior_n"]
     df["base"] = np.where(n > 0, (n * df["ewm"].fillna(0) + SHRINK_GAMES * df["pos_mean"]) / (n + SHRINK_GAMES),
                           df["pos_mean"])
@@ -158,6 +221,14 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
 
     ctx = game_context(conn) if context is None else context
     df = df.merge(ctx, how="left", on=["game_id", "team"])
+    form = team_form(conn, first_season) if form is None else form
+    df = df.merge(form, how="left", on=["team", "season", "week"])
+    # the league's average recent pass attempts as of that week (each team's att3 uses only its earlier games)
+    if len(form):
+        league_att = form.groupby(["season", "week"])["att3"].mean().rename("league_att").reset_index()
+        df = df.merge(league_att, how="left", on=["season", "week"])
+    else:
+        df["league_att"] = np.nan
     flags = injury_flags(conn) if flags is None else flags
     df = df.merge(flags[["season", "week", "player_id", "questionable", "limited_practice"]], how="left",
                   on=["season", "week", "player_id"])
@@ -177,6 +248,15 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
     df["cold"] = (df["temp"].fillna(70.0) < 32).astype(float)
     eps = 0.02 if STATS[stat][0] == "target_share" else 1.0
     df["usage_trend"] = np.log((df["usage_recent"].fillna(0) + eps) / (df["usage_ewm"].fillna(0) + eps)).fillna(0)
+    # snap_pct feature: use recent then ewm, and a binary starter flag when recent share >= 0.6
+    # a player with no earlier snap data (rookie, new team, snaps not loaded) gets his position's average share,
+    # not 0 (which would read as a backup and bias the prediction down)
+    # the position's average share in the PREVIOUS season, so no later data leaks into the filler
+    typical = df.groupby(["position_group", "season"])["snap_recent"].mean().rename("typical_snap").reset_index()
+    typical["season"] += 1
+    df = df.merge(typical, how="left", on=["position_group", "season"])
+    df["snap_pct"] = df["snap_recent"].fillna(df["snap_ewm"]).fillna(df["typical_snap"]).fillna(0.5)
+    df["starter_flag"] = (df["snap_pct"] >= 0.6).astype(float)
     for col in ("questionable", "limited_practice", "qb_out", "opp_def_starters_out", "home"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.5 if col == "home" else 0.0)
     return df
@@ -234,6 +314,7 @@ def prob_over(params, mu, sigma, line):
     p = _raw_prob_over(params, mu, sigma, line)
     if "calib" in params:
         p = recalibrate(p, params["calib"])
+    # the backtest showed the raw model is overconfident: never more than 99% sure either way
     return np.clip(p, 0.01, 0.99)
 
 
@@ -306,12 +387,16 @@ def latest_week(conn):
     return row[0] or 0
 
 
-def fitted(conn, stat, positions):
-    """Stored params fitted on every finished game, refitting (and storing) them when new games arrive."""
+def fitted(conn, stat, positions, df=None):
+    """Stored params fitted on every finished game, refitting (and storing) them when new games arrive, or when
+    they were fitted before a feature was added. df: an already-built features() frame to fit from (its upcoming
+    rows are ignored), so callers don't build it twice."""
     version = latest_week(conn)
     row = conn.execute("SELECT params, trained_through FROM model_params WHERE stat = ?", (stat,)).fetchone()
     if row and row[1] >= version:
-        return json.loads(row[0])
-    params = fit_calibrated(features(conn, stat, positions), stat)
+        params = json.loads(row[0])
+        if set(FEATURES) <= set(params["beta"]):
+            return params
+    params = fit_calibrated(features(conn, stat, positions) if df is None else df, stat)
     save_params(conn, params, version)
     return params

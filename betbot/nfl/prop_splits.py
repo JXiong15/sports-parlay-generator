@@ -1,6 +1,7 @@
 """Saved DraftKings player-prop splits as a DataFrame, tagged with NFL season and week and sorted by week."""
 import os
 
+import numpy as np
 import pandas as pd
 
 from betbot import db
@@ -23,6 +24,21 @@ def dataframe(conn):
     df = pd.read_sql_query(QUERY, conn)
     return df.sort_values(["season", "week", "published", "player", "prop_type", "period"],
                           na_position="first", kind="stable").reset_index(drop=True)
+
+
+def past_lines(conn):
+    """Past DraftKings lines pulled once from EndzoneAPI (2023 on, table endzone_lines), shaped like dataframe() but
+    with no splits. It is the opening line, to match the earliest article of the week; the evidence is therefore
+    against opening numbers (closing lines are sharper), so edges measured on it can look a little better than a later bet."""
+    cols = ["season", "week", "player", "prop_type", "period", "line", "over_ticket_pct", "over_handle_pct"]
+    e = pd.read_sql_query("SELECT game_id, player_name AS player, market, coalesce(open_line, line) AS line"
+                          " FROM endzone_lines WHERE coalesce(open_line, line) IS NOT NULL", conn)
+    if e.empty:
+        return pd.DataFrame(columns=cols)
+    parts = e["game_id"].str.split("_", n=2, expand=True)
+    return e.assign(season=parts[0].astype(int), week=parts[1].astype(int), period=None,
+                    prop_type=e["market"].str.replace("player_", "", regex=False), over_ticket_pct=np.nan,
+                    over_handle_pct=np.nan)[cols]
 
 
 if __name__ == "__main__":

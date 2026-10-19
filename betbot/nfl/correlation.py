@@ -33,7 +33,7 @@ def _games(conn):
 def _surprises(conn, stat):
     positions = next(p for s, p in MARKETS.values() if s == stat)
     df = model.features(conn, stat, positions)
-    params = model.fitted(conn, stat, positions)
+    params = model.fitted(conn, stat, positions, df)
     df = df[df["y"].notna() & (df["prior_n"] >= model.MIN_PRIOR_GAMES) & (df["season"].between(FIRST, LAST))]
     df = model.predict(df[df["base"] >= 0.5 * df["pos_mean"]], params)
     return df.assign(z=(df["y"] - df["mu"]) / df["sigma"])[["game_id", "team", "player_id", "z"]]

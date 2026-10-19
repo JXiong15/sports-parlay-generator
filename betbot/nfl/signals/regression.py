@@ -149,15 +149,18 @@ def evaluate(conn, market="player_pass_yds", now=None, shared=None):
 
 def _add_probabilities(conn, stat, positions, results, upcoming, shared=None):
     shared = shared or {}
-    params = model.fitted(conn, stat, positions)
-    df = model.predict(model.features(conn, stat, positions, upcoming, context=shared.get("context"),
-                                      flags=shared.get("flags"), absences=shared.get("absences")), params)
+    frame = model.features(conn, stat, positions, upcoming, context=shared.get("context"),
+                           flags=shared.get("flags"), absences=shared.get("absences"), snaps=shared.get("snaps"),
+                           form=shared.get("form"))
+    params = model.fitted(conn, stat, positions, frame)
+    df = model.predict(frame, params)
     df = df[df["y"].isna()].drop_duplicates(["player_id", "game_id"]).set_index(["player_id", "game_id"])
     for r in results:
         key = (r["player_id"], r["game_id"])
         if r["game_id"] and key in df.index:
             row = df.loc[key]
             r["mu"], r["sigma"] = round(float(row["mu"]), 1), round(float(row["sigma"]), 1)
+            r["row"] = row.to_dict()  # every model feature for this prop (the conviction score reads them)
             r["p_over"] = round(float(model.prob_over(params, row["mu"], row["sigma"], r["line"])), 3)
 
 
