@@ -271,11 +271,6 @@ def real_lines(conn):
         ["season", "week", "player", "market", "line", "over_tickets", "over_handle"]].assign(source="DraftKings line")
 
 
-def _side_pct(pct, over):
-    """The % on our side from the Over's %, or None when unknown."""
-    return None if pct is None or pd.isna(pct) else (pct if over else 100 - pct)
-
-
 def score_lines(conn, lines, quantiles, cache=None):
     """Score each (season, week, player, market, line) the way the live board does: a model fitted on earlier weeks
     only, signals from information before that game, the market penalty from the saved splits when there are any.
@@ -313,8 +308,8 @@ def score_lines(conn, lines, quantiles, cache=None):
                 if pd.isna(raw.iloc[0]):
                     continue
                 over = sign.iloc[0] > 0
-                penalty, _ = market_penalty(_side_pct(r.over_tickets, over), _side_pct(r.over_handle, over))
-                score = max(0.0, float(to_score(raw.iloc[0], quantiles[stat])) - penalty)
+                # no market penalty here: live splits are often missing, so the evidence must not assume them
+                score = float(to_score(raw.iloc[0], quantiles[stat]))
                 y = t["y"].iloc[0]
                 rows.append({"season": season, "week": week, "player": r.player, "market": market, "line": line,
                              "source": source, "side": _name(sign.iloc[0]), "score": score,

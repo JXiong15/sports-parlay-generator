@@ -275,18 +275,17 @@ def test_empty_history_does_not_crash(monkeypatch):
     assert conviction.score_picks([pick], {"quantiles": q}) == []      # no scale for rushing yards: skipped, no KeyError
 
 
-def test_a_shown_pick_is_logged_even_if_the_side_or_line_changes_later():
+def test_a_shown_pick_is_logged_once_per_prop_as_first_shown():
     conn = db.connect(":memory:")
     base = dict(kind="conviction", made_at="t", game_id="g1", event_id="e1", player="A B", player_id="ab",
                 market="player_pass_yds", side="Over", line=240.5, price=-110, other_price=-110, book="draftkings",
                 model_prob=0.62, implied_prob=0.5, vig_removed=1, p_over=None, mu=None, conviction=96.0)
     assert db.save_predictions(conn, [base]) == 1
     assert db.save_predictions(conn, [base]) == 0                        # the identical pick again
-    assert db.save_predictions(conn, [dict(base, side="Under", price=-105)]) == 1   # a different pick that was shown
-    assert db.save_predictions(conn, [dict(base, line=243.5)]) == 1
+    assert db.save_predictions(conn, [dict(base, side="Under", price=-105, line=243.5, book="fd")]) == 0   # same prop: first shown stays
     board = dict(base, kind="prop", conviction=None)
     assert db.save_predictions(conn, [board]) == 1 and db.save_predictions(conn, [dict(board, side="Under")]) == 0   # board picks: one per market
-    assert conn.execute("SELECT count(*) FROM predictions").fetchone()[0] == 4
+    assert conn.execute("SELECT count(*) FROM predictions").fetchone()[0] == 2
 
 
 def test_tables_built_under_other_scoring_rules_are_rebuilt(monkeypatch):

@@ -339,24 +339,15 @@ PREDICTION_COLUMNS = ("kind", "made_at", "game_id", "event_id", "player", "playe
 
 
 def save_predictions(conn, rows):
-    """Keeps the first logging of each prop or game market (same game, player and market, whichever book), compared
-    with IS so empty values still match."""
+    """Keeps the first logging of each kind of pick per prop or game market (same game, player and market, whichever
+    book, side or line), compared with IS so empty values still match. A shown pick stays as first shown."""
     cols = ", ".join(PREDICTION_COLUMNS)
-    saved = 0
-    # board picks are one per market (a flipped side is the same bet). A pick SHOWN to the user (kind 'conviction') is
-    # logged as shown: a different side, line or book on a later run is its own pick, so grading describes what was seen
-    for shown in (False, True):
-        batch = [r for r in rows if (r.get("kind") == "conviction") == shown]
-        if not batch:
-            continue
-        keys = ("kind", "game_id", "player_id", "market") + (("side", "line", "book") if shown else ())
-        same = " AND ".join(f"{c} IS :{c}" for c in keys)
-        cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
-                               f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
-                               f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
-                               [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in batch])
-        saved += cur.rowcount
-    return saved
+    same = " AND ".join(f"{c} IS :{c}" for c in ("kind", "game_id", "player_id", "market"))
+    cur = conn.executemany(f"INSERT OR IGNORE INTO predictions ({cols}) SELECT"
+                           f" {', '.join(':' + c for c in PREDICTION_COLUMNS)}"
+                           f" WHERE NOT EXISTS (SELECT 1 FROM predictions WHERE {same})",
+                           [{c: r.get(c) for c in PREDICTION_COLUMNS} for r in rows])
+    return cur.rowcount
 
 
 KALSHI_COLUMNS = ("ticker", "series", "event_ticker", "market", "subject", "strike", "game_date", "away", "home",
