@@ -123,12 +123,15 @@ def cached_features(conn, stat, positions, cache):
     return cache[key]
 
 
-def props_real(conn, cache=None):
-    """DraftKings Network prop lines (full-game props the model covers), graded against actual stats."""
+def real_rows(conn, cache=None):
+    """Real DraftKings prop lines (DraftKings Network articles, plus EndzoneAPI history), graded against actual stats."""
     cache = {} if cache is None else cache
-    from betbot.nfl.prop_splits import dataframe
+    from betbot.nfl.prop_splits import dataframe, past_lines
     lines = dataframe(conn)
     lines = lines[lines["period"].isna() & lines["season"].notna()]
+    past = past_lines(conn)
+    key = ["season", "week", "player", "prop_type"]   # an article's line wins; EndzoneAPI fills the other weeks
+    lines = pd.concat([lines, past[~past.set_index(key).index.isin(lines.set_index(key).index)]])
     rows = []
     for market, (stat, positions) in MARKETS.items():
         lm = lines[lines["prop_type"] == market.replace("player_", "")]
@@ -151,8 +154,14 @@ def props_real(conn, cache=None):
                 rows.append({"market": market, "season": season, "week": week, "player": r.player, "line": r.line,
                              "p_over": float(model.prob_over(params, t["mu"], t["sigma"], r.line)),
                              "over": int(t["y"] > r.line), "over_tickets": r.over_ticket_pct,
-                             "over_handle": r.over_handle_pct})
-    d = pd.DataFrame(rows)
+                             "over_handle": r.over_handle_pct, "mu": float(t["mu"]), "sigma": float(t["sigma"]),
+                             "base": float(t["base"])})
+    return pd.DataFrame(rows)
+
+
+def props_real(conn, cache=None):
+    """Hit rate, calibration and the stored real-line recalibration for the model on real lines."""
+    d = real_rows(conn, cache)
     if d.empty:
         return {"n": 0}
     # market lines are sharper than a player's own baseline: learn a second recalibration from real lines,

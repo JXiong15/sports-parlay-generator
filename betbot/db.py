@@ -149,6 +149,27 @@ CREATE TABLE IF NOT EXISTS model_params (  -- fitted player-stat model, one row 
     params TEXT NOT NULL,              -- JSON: coefficients, scale, error distribution
     fitted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS endzone_lines (  -- historical DraftKings prop lines (EndzoneAPI), pulled once and kept
+    player_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    game_id TEXT NOT NULL,        -- nflverse game_id: season_week_away_home
+    game_date TEXT,
+    player_name TEXT,
+    line REAL,                    -- closing line
+    open_line REAL,
+    over_odds INTEGER,
+    under_odds INTEGER,
+    books INTEGER,
+    PRIMARY KEY (player_id, market, game_id)
+);
+CREATE TABLE IF NOT EXISTS endzone_pulled (  -- every player and market already asked for, empty answers included
+    player_id TEXT NOT NULL,
+    market TEXT NOT NULL,
+    bookmaker TEXT NOT NULL,
+    pulled_at TEXT NOT NULL,
+    games INTEGER NOT NULL,
+    PRIMARY KEY (player_id, market, bookmaker)
+);
 CREATE TABLE IF NOT EXISTS parlays (  -- every parlay shown: its legs as made; graded from the predictions table
     id INTEGER PRIMARY KEY,
     made_at TEXT NOT NULL,

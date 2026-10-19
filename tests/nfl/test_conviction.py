@@ -315,7 +315,7 @@ def test_real_lines_take_the_earliest_article_per_player_and_week(monkeypatch):
                        "period": [None, None], "line": [240.5, 243.5], "published": ["2026-10-01", "2026-10-03"],
                        "over_ticket_pct": [60, 70], "over_handle_pct": [55, 65]})
     monkeypatch.setattr(prop_splits, "dataframe", lambda conn: df.iloc[::-1])
-    out = conviction.real_lines(None)
+    out = conviction.real_lines(db.connect(":memory:"))
     assert out["line"].tolist() == [240.5]
 
 

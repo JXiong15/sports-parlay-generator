@@ -267,8 +267,18 @@ def real_lines(conn):
     lines["market"] = "player_" + lines["prop_type"]
     lines = lines[lines["market"].isin(CONVICTION_MARKETS)]
     lines = lines.sort_values("published").drop_duplicates(["season", "week", "player", "market"])
-    return lines.rename(columns={"over_ticket_pct": "over_tickets", "over_handle_pct": "over_handle"})[
-        ["season", "week", "player", "market", "line", "over_tickets", "over_handle"]].assign(source="DraftKings line")
+    lines = lines.rename(columns={"over_ticket_pct": "over_tickets", "over_handle_pct": "over_handle"})[
+        ["season", "week", "player", "market", "line", "over_tickets", "over_handle"]]
+    return pd.concat([lines, saved_lines(conn)]).drop_duplicates(["season", "week", "player", "market"]).assign(
+        source="DraftKings line")
+
+
+def saved_lines(conn):
+    """Past DraftKings lines from EndzoneAPI, in the shape real_lines returns (see prop_splits.past_lines)."""
+    from betbot.nfl.prop_splits import past_lines
+    e = past_lines(conn).rename(columns={"over_ticket_pct": "over_tickets", "over_handle_pct": "over_handle"})
+    e["market"] = "player_" + e["prop_type"]
+    return e[["season", "week", "player", "market", "line", "over_tickets", "over_handle"]]
 
 
 def score_lines(conn, lines, quantiles, cache=None):
