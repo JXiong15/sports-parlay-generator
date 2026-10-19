@@ -36,7 +36,7 @@ def test_legs_and_conflicts():
     assert len(legs) == 1 and legs[0]["home"] == "GB" and legs[0]["away"] == "DAL"
     assert abs(legs[0]["prob"] - 0.54) < 1e-9          # the model's 56% halfway back to the book's 52%
     assert parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "away") | {"game": "g"})
-    assert not parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "home") | {"game": "g"})
+    assert parlays.conflicts(game("spread", "home") | {"game": "g"}, game("moneyline", "home") | {"game": "g"})  # same team too
     assert parlays.conflicts(prop(), prop("Under") | {"market": "player_x"})
     assert not parlays.conflicts(prop(), prop(player="qb2"))
 

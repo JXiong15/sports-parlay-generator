@@ -55,7 +55,7 @@ def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV
 
 
 def conflicts(a, b):
-    """Both sides of one bet, or two bets that can't both be the play (e.g. one team's spread, the other's ML)."""
+    """Both sides of one bet, or two bets that can't both be the play (any spread with a moneyline of the same game)."""
     if a["game"] != b["game"]:
         return False
     if a["kind"] == "prop" and b["kind"] == "prop":
@@ -63,7 +63,7 @@ def conflicts(a, b):
     if a["kind"] == "game" and b["kind"] == "game":
         if a["market"] == b["market"]:
             return True
-        return {a["market"], b["market"]} == {"spread", "moneyline"} and a["side"] != b["side"]
+        return {a["market"], b["market"]} == {"spread", "moneyline"}   # a spread and a moneyline of one game can't be bet together
     return False
 
 
