@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from betbot import db
 from betbot.collectors import action_network, dk_network, odds_api
-from betbot.nfl import board, conviction, grader, parlays
+from betbot.nfl import board, conviction, grader, parlays, pocket
 from betbot.nfl.collectors import espn, kalshi, nflverse, weather
 
 
@@ -186,6 +186,13 @@ def collect():
             conviction.log_picks(conn, conviction.run(conn, picks))
         except Exception as e:
             print(f"conviction failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+        try:
+            pocket.run(conn, picks)
+            graded, wins = pocket.record(conn)
+            print(f"pocket rule so far: {wins}/{graded} graded picks won")
+        except Exception as e:
+            print(f"pocket failed: {e.__class__.__name__}: {e}")
             traceback.print_exc()
 
 
