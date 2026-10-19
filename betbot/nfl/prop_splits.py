@@ -28,7 +28,8 @@ def dataframe(conn):
 
 def past_lines(conn):
     """Past DraftKings lines pulled once from EndzoneAPI (2023 on, table endzone_lines), shaped like dataframe() but
-    with no splits: the opening line, which is what the earliest article of the week shows."""
+    with no splits. It is the opening line, to match the earliest article of the week; the evidence is therefore
+    against opening numbers (closing lines are sharper), so edges measured on it can look a little better than a later bet."""
     cols = ["season", "week", "player", "prop_type", "period", "line", "over_ticket_pct", "over_handle_pct"]
     e = pd.read_sql_query("SELECT game_id, player_name AS player, market, coalesce(open_line, line) AS line"
                           " FROM endzone_lines WHERE coalesce(open_line, line) IS NOT NULL", conn)

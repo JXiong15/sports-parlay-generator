@@ -269,8 +269,10 @@ def real_lines(conn):
     lines = lines.sort_values("published").drop_duplicates(["season", "week", "player", "market"])
     lines = lines.rename(columns={"over_ticket_pct": "over_tickets", "over_handle_pct": "over_handle"})[
         ["season", "week", "player", "market", "line", "over_tickets", "over_handle"]]
-    return pd.concat([lines, saved_lines(conn)]).drop_duplicates(["season", "week", "player", "market"]).assign(
-        source="DraftKings line")
+    from betbot.names import normalize
+    both = pd.concat([lines, saved_lines(conn)])      # articles first: they win where both have the prop
+    both = both.assign(who=both["player"].map(normalize)).drop_duplicates(["season", "week", "who", "market"])
+    return both.drop(columns="who").assign(source="DraftKings line")
 
 
 def saved_lines(conn):
@@ -278,6 +280,7 @@ def saved_lines(conn):
     from betbot.nfl.prop_splits import past_lines
     e = past_lines(conn).rename(columns={"over_ticket_pct": "over_tickets", "over_handle_pct": "over_handle"})
     e["market"] = "player_" + e["prop_type"]
+    e = e[e["market"].isin(CONVICTION_MARKETS)]
     return e[["season", "week", "player", "market", "line", "over_tickets", "over_handle"]]
 
 

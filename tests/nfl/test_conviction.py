@@ -1,4 +1,5 @@
 import pytest
+from tests.nfl.test_endzone import Session, conn_with_players
 import numpy as np
 import pandas as pd
 
@@ -345,3 +346,30 @@ def test_parlay_log_and_record_settle_from_leg_results():
     assert parlays.record(conn) == (1, 0, 0.3)                                     # a+b lost; c+d still waiting on d
     conn.execute("UPDATE predictions SET result = 'win' WHERE player_id = 'd'")
     assert parlays.record(conn) == (2, 1, 0.3)
+
+
+def test_parlay_with_a_game_leg_and_a_prop_leg_logs_and_a_moved_line_still_settles():
+    from betbot.nfl import parlays
+    conn = db.connect(":memory:")
+    prop = dict(game="g1", player_id="a", market="player_pass_yds", side="Under", line=250.5)
+    game = dict(game="g1", market="spread", side="home", line=-3.0)
+    assert parlays.log(conn, [{"true_prob": 0.3, "price": 260, "legs": [prop, game]}]) == 1   # None vs str ids
+    base = dict(kind="prop", made_at="t", game_id="g1", event_id="e", player="x", player_id="a",
+                market="player_pass_yds", side="Over", line=240.5, price=-110, other_price=-110, book="dk",
+                model_prob=0.55, implied_prob=0.5, vig_removed=1, p_over=None, mu=None, conviction=None)
+    db.save_predictions(conn, [base])
+    conn.execute("UPDATE predictions SET result = 'win', actual = 230")           # logged as Over 240.5; the leg is Under 250.5
+    assert parlays._leg_result(conn, "g1", "a", "player_pass_yds", "Under", 250.5) == "win"
+    assert parlays._leg_result(conn, "g1", None, "spread", "home", -3.0) is None
+    conn.execute("UPDATE predictions SET result = 'unverified'")
+    assert parlays.record(conn)[0] == 0                            # unverified: still open
+
+
+def test_the_pull_stops_at_its_credit_cap_and_never_goes_negative():
+    from betbot.nfl.collectors import endzone as ez
+    conn = conn_with_players()
+    ez.pull(conn, [("a", "Ann QB", "player_pass_yds"), ("c", "Cy QB", "player_pass_yds")], "key",
+            Session({"a": {"player_name": "A", "games": []}, "c": {"player_name": "C", "games": []}}),
+            sleep=lambda s: None, max_credits=10)
+    assert conn.execute("SELECT count(*) FROM endzone_pulled").fetchone()[0] == 1
+    assert ez.plan(conn, ["player_pass_yds"], max_credits=-10) == []

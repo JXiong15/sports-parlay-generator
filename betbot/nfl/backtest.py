@@ -130,7 +130,8 @@ def real_rows(conn, cache=None):
     lines = dataframe(conn)
     lines = lines[lines["period"].isna() & lines["season"].notna()]
     past = past_lines(conn)
-    key = ["season", "week", "player", "prop_type"]   # an article's line wins; EndzoneAPI fills the other weeks
+    key = ["season", "week", "who", "prop_type"]   # an article's line wins; EndzoneAPI fills the other weeks
+    lines, past = (f.assign(who=f["player"].map(normalize)) for f in (lines, past))
     lines = pd.concat([lines, past[~past.set_index(key).index.isin(lines.set_index(key).index)]])
     rows = []
     for market, (stat, positions) in MARKETS.items():

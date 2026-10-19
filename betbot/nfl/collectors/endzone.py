@@ -49,7 +49,7 @@ def plan(conn, markets, max_credits=None, since=2023, min_games=None):
     """(player_id, name, market) not pulled yet, in priority order, within the credit budget."""
     done = {tuple(r) for r in conn.execute("SELECT player_id, market FROM endzone_pulled WHERE bookmaker = ?", (BOOK,))}
     todo = [(pid, name, m) for m in markets for pid, name in candidates(conn, m, since, min_games) if (pid, m) not in done]
-    return todo if max_credits is None else todo[:max_credits // CREDITS_PER_CALL]
+    return todo if max_credits is None else todo[:max(max_credits, 0) // CREDITS_PER_CALL]
 
 
 def save(conn, player_id, market, games, pulled_at):
@@ -63,13 +63,19 @@ def save(conn, player_id, market, games, pulled_at):
 
 
 def fetch(session, key, player_id, market):
-    """All of one player's games for one market (follows the paging cursor). Raises on any non-200 reply."""
-    games, start = [], None
+    """(games, calls made): all of one player's games for one market, following the paging cursor. Retries a rate
+    limit or server error three times; any other non-200 reply raises."""
+    games, start, calls = [], None, 0
     while True:
         body = {"player_id": player_id, "market": market, "bookmaker": BOOK, "limit": 200}
         if start:
             body["from_date"] = start
-        resp = session.post(URL, json=body, headers={"x-api-key": key}, timeout=60)
+        for attempt in range(3):
+            resp = session.post(URL, json=body, headers={"x-api-key": key}, timeout=60)
+            calls += 1
+            if resp.status_code != 429 and resp.status_code < 500:
+                break
+            time.sleep(PAUSE * 5 * (attempt + 1))
         if resp.status_code != 200:
             raise RuntimeError(f"EndzoneAPI {resp.status_code}: {resp.text[:200]}")
         data = resp.json()["data"]
@@ -77,15 +83,22 @@ def fetch(session, key, player_id, market):
         games += [dict(g, player_name=name) for g in data.get("games", [])]
         start = data.get("next_from_date")
         if not (data.get("truncated") and start):
-            return games
+            return games, calls
         time.sleep(PAUSE)
 
 
-def pull(conn, todo, key, session=None, sleep=time.sleep):
+def pull(conn, todo, key, session=None, sleep=time.sleep, max_credits=None):
+    """Pulls and saves each player in turn; stops before the next one if the credits spent (every call counts,
+    paging and retries included) would pass max_credits."""
     from datetime import datetime, timezone
     session = session or requests.Session()
+    spent = 0
     for i, (pid, name, market) in enumerate(todo, 1):
-        games = fetch(session, key, pid, market)
+        if max_credits is not None and spent + CREDITS_PER_CALL > max_credits:
+            print(f"stopped at {spent} credits (cap {max_credits})")
+            break
+        games, calls = fetch(session, key, pid, market)
+        spent += calls * CREDITS_PER_CALL
         save(conn, pid, market, games, datetime.now(timezone.utc).isoformat(timespec="seconds"))
         print(f"[{i}/{len(todo)}] {name} {market}: {len(games)} games")
         sleep(PAUSE)
@@ -107,12 +120,12 @@ def main(argv=None):
     print(f"{len(todo)} calls, up to {len(todo) * CREDITS_PER_CALL} credits (empty results are free): {by_market}")
     if not args.go:
         return print("Plan only. Add --go --max-credits N to pull.")
-    if args.max_credits is None:
-        raise SystemExit("--go needs --max-credits")
+    if args.max_credits is None or args.max_credits < 0:
+        raise SystemExit("--go needs --max-credits N (zero or more)")
     key = os.getenv("ENDZONE_API_KEY")
     if not key:
         raise SystemExit("ENDZONE_API_KEY is not set in .env")
-    pull(conn, todo, key)
+    pull(conn, todo, key, max_credits=args.max_credits)
 
 
 if __name__ == "__main__":

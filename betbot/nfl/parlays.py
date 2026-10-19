@@ -3,7 +3,7 @@ and true combined probability and EV (betbot/parlay.py). Two modes:
 
   default: the BET / FADE picks (the side the model favors), ranked by EV.
   hunt:    high-payout mispricings only: either side of any prop or game line, priced +150 to +400, where our
-           probability beats the book's no-vig probability by at least min_conv (e.g. 0.12 = 12 points) and the
+           probability (halfway back to the book's, see SHRINK) beats its no-vig probability by at least min_conv and the
            side still passes decision.py's market checks. Ranked by combined conviction, then payout.
 """
 import argparse
@@ -82,25 +82,37 @@ def log(conn, results):
     """Saves each parlay shown (once per set of legs) so its result can be checked against its predicted chance."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = [{"made_at": now, "true_prob": r["true_prob"], "price": r["price"],
-             "legs": json.dumps(sorted([l["game"], l.get("player_id"), l["market"], l["side"], l.get("line")]
-                                       for l in r["legs"]), sort_keys=True)} for r in results]
+             "legs": json.dumps(sorted(([l["game"], l.get("player_id"), l["market"], l["side"], l.get("line")]
+                                        for l in r["legs"]), key=repr))} for r in results]
     with conn:
         return db.save_parlays(conn, rows)
 
 
+def _leg_result(conn, game, player, market, side, line):
+    """win / loss / push / void for one parlay leg from the logged pick on that prop or game market. The logged pick
+    is the first one made, so a leg on the other side or line is graded from the actual stat when there is one."""
+    row = conn.execute("SELECT side, line, result, actual FROM predictions WHERE game_id = ? AND player_id IS ?"
+                       " AND market = ? AND result IS NOT NULL LIMIT 1", (game, player, market)).fetchone()
+    if row is None:
+        return None
+    if (row[0], row[1]) == (side, line):
+        return row[2]
+    if player is None or line is None or row[3] is None:
+        return None     # a game leg on another side or line, or a prop without its stat: can't say
+    if row[3] == line:
+        return "push"
+    return "win" if (row[3] > line) == (side == "Over") else "loss"
+
+
 def record(conn):
     """Settled parlays vs what we predicted: (settled, won, average predicted chance). A parlay loses when any leg
-    lost, wins when every leg won, and stays open while a leg is ungraded or can't be found (pushes void a leg)."""
+    lost and wins when every leg won or pushed (at least one won); it stays open while a leg is ungraded, unverified
+    or can't be found."""
     settled = won = 0
     chance = 0.0
-    for legs, prob in conn.execute("SELECT legs, true_prob FROM parlays"):
-        results = []
-        for game, player, market, side, line in json.loads(legs):
-            row = conn.execute("SELECT result FROM predictions WHERE game_id = ? AND player_id IS ? AND market = ?"
-                               " AND side = ? AND line IS ? AND result IS NOT NULL LIMIT 1",
-                               (game, player, market, side, line)).fetchone()
-            results.append(row[0] if row else None)
-        if "loss" in results or (None not in results and "win" in results):
+    for legs, prob in conn.execute("SELECT legs, true_prob FROM parlays").fetchall():
+        results = [_leg_result(conn, *leg) for leg in json.loads(legs)]
+        if "loss" in results or ("win" in results and all(r in ("win", "push", "void") for r in results)):
             settled += 1
             won += "loss" not in results
             chance += prob
@@ -138,7 +150,7 @@ def main(argv=None):
     ap.add_argument("--hunt", action="store_true", help="plus-money, high-edge legs only")
     ap.add_argument("--min-price", type=int, default=MIN_PRICE)
     ap.add_argument("--max-price", type=int, default=MAX_PRICE)
-    ap.add_argument("--min-conv", type=float, default=MIN_CONV, help="minimum edge over the no-vig price, e.g. 0.15")
+    ap.add_argument("--min-conv", type=float, default=MIN_CONV, help="minimum edge over the no-vig price after SHRINK halves the model's edge, e.g. 0.10")
     ap.add_argument("--legs", type=int, default=2, help="most legs per parlay (fewer legs hit more often)")
     ap.add_argument("--record", action="store_true", help="show settled parlays vs predicted chance, then exit")
     args = ap.parse_args(argv)
