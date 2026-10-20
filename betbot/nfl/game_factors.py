@@ -3,40 +3,53 @@ starters out, starting QB out, rest, weather, division games, and a prime-time h
 Each factor is measured on past games (what the ratings model missed by, in points), then added to the model's
 expected margin and total. Coefficients are ridge fits, tested season by season on games they never saw
 (`python -m betbot.nfl.game_factors`)."""
+import sqlite3
+
 import numpy as np
 import pandas as pd
 
 from betbot.nfl import game_model, model
-from betbot.nfl.teams import TEAMS
+from betbot.nfl.teams import HOME, TEAMS, local_hour
 
 FIRST_FIT_SEASON = 2013      # snap counts (defensive starters) start here
 RIDGE = 30.0
 ROLL = 6                     # games in a team's recent offense / defense form
 KEY = "_game_factors"
-MARGIN = ["qb_diff", "def_out_diff", "pass_match", "rush_match", "rest_diff", "div_game", "prime_favorite",
-          "bets_home", "gap_home", "move_home"]
-TOTAL = ["qb_total", "def_out_total", "pass_pace", "rush_pace", "wind", "cold", "dome", "prime", "short_rest",
-         "bets_over", "gap_over", "move_total"]
+LEAGUE_WEEKS = 48            # the league average each form is measured against: the previous ~3 seasons of weeks
+MARGIN = ["travel_diff", "body_clock_diff", "ref_home", "qb_diff", "ol_diff", "skill_diff", "rush_def_diff",
+          "secondary_diff", "lb_diff", "pass_match", "rush_match", "epa_pass_match", "epa_rush_match",
+          "pressure_match", "rest_diff", "div_game", "prime_favorite", "bets_home", "gap_home", "move_home"]
+TOTAL = ["ref_total", "qb_total", "ol_total", "skill_total", "defense_total", "pass_pace", "rush_pace", "epa_total",
+         "pace_total", "wind", "gust", "rain", "cold", "dome", "prime", "short_rest", "bets_over", "gap_over",
+         "move_total"]
 
 
-def _team_form(conn):
+def _upcoming_rows(conn):
+    """A (game_id, season, week, team) row with no stats for both teams of every unplayed game, so each team's
+    rolling form carries forward to its next game instead of stopping at the last one played."""
+    rows = conn.execute("SELECT game_id, season, week, home_team, away_team FROM nfl_games"
+                        " WHERE home_score IS NULL").fetchall()
+    return pd.DataFrame([(g, s, w, t) for g, s, w, h, a in rows for t in (h, a)],
+                        columns=["game_id", "season", "week", "team"])
+
+
+def _is_missing_table(error):
+    return "no such table" in str(error)
+
+
+def _team_form(conn, upcoming):
     """Per (game_id, team): rolling mean of the team's passing / rushing yards for and against over its previous
-    ROLL games (carried across seasons), minus the league's average to date."""
+    ROLL games (carried across seasons), minus the league's average."""
     w = pd.read_sql_query(
         "SELECT game_id, team, opponent_team, season, week, sum(passing_yards) AS pass_for,"
         " sum(rushing_yards) AS rush_for FROM nfl_player_weeks WHERE season_type = 'REG'"
         " GROUP BY game_id, team, opponent_team, season, week", conn)
     against = w[["game_id", "team", "pass_for", "rush_for"]].rename(
         columns={"team": "opponent_team", "pass_for": "pass_against", "rush_for": "rush_against"})
-    w = w.merge(against, on=["game_id", "opponent_team"], how="left").sort_values(["season", "week"])
+    w = w.merge(against, on=["game_id", "opponent_team"], how="left")
     w = w.drop_duplicates(["game_id", "team"])   # a stray stat row listing another opponent for the same game
-    for col in ("pass_for", "rush_for", "pass_against", "rush_against"):
-        roll = w.groupby("team")[col].transform(lambda s: s.shift(1).rolling(ROLL, min_periods=3).mean())
-        weekly = w.groupby(["season", "week"])[col].agg(["sum", "count"]).sort_index()
-        league = (weekly["sum"].cumsum() / weekly["count"].cumsum()).shift(1).rename("league")   # earlier weeks only
-        w = w.join(league, on=["season", "week"])
-        w[col + "_adv"] = roll - w.pop("league")
-    return w.set_index(["game_id", "team"])[[c + "_adv" for c in ("pass_for", "rush_for", "pass_against", "rush_against")]]
+    cols = ["pass_for", "rush_for", "pass_against", "rush_against"]
+    return _roll_adv(w, cols, upcoming).set_index(["game_id", "team"])[[c + "_adv" for c in cols]]
 
 
 def _splits(conn):
@@ -70,6 +83,43 @@ def _splits(conn):
     return out.fillna(0)
 
 
+def _referees(conn):
+    """Per game_id: the referee's earlier games' average miss of the betting line (total and home margin), shrunk
+    toward 0 by games / (games + 40). Uses only games before this one."""
+    r = pd.read_sql_query("SELECT game_id, gameday, referee, home_score - away_score AS margin, home_score + away_score AS tot,"
+                          " spread_line, total_line FROM nfl_games WHERE referee IS NOT NULL ORDER BY gameday, game_id", conn)
+    r["miss_total"] = r["tot"] - r["total_line"]
+    r["miss_margin"] = r["margin"] - r["spread_line"]
+    out = {}
+    for col, name in (("miss_total", "ref_total"), ("miss_margin", "ref_home")):
+        counted = r[col].notna()                 # a game with no betting line or no score says nothing about the miss
+        x = r[col].fillna(0.0)
+        g = x.groupby(r["referee"])
+        n = counted.astype(float).groupby(r["referee"]).cumsum() - counted.astype(float)    # earlier counted games
+        before = g.cumsum() - x
+        out[name] = (before / n.clip(lower=1)) * (n / (n + 40))
+    return pd.DataFrame({"game_id": r["game_id"], **out}).set_index("game_id")
+
+
+def _travel(g):
+    """Away team's trip: distance (thousand km) and how early the kickoff is on its body clock, from team home
+    cities and kickoff time (Eastern). Neutral-site games count as no travel difference."""
+    def haversine(a, b):
+        la1, lo1, la2, lo2 = map(np.radians, (a[0], a[1], b[0], b[1]))
+        h = np.sin((la2 - la1) / 2) ** 2 + np.cos(la1) * np.cos(la2) * np.sin((lo2 - lo1) / 2) ** 2
+        return 6371 * 2 * np.arcsin(np.sqrt(h))
+    km, early = [], []
+    for home, away, day, time, loc in zip(g["home_team"], g["away_team"], g["gameday"], g["gametime"], g["location"]):
+        if home not in HOME or away not in HOME or loc == "Neutral":
+            km.append(0.0)
+            early.append(0.0)
+            continue
+        km.append(haversine(HOME[away], HOME[home]) / 1000)
+        body = local_hour(day, time, away)             # kickoff hour on the AWAY team's body clock
+        early.append(float(np.clip((12 - body) / 3, 0, 1)))
+    return np.array(km), np.array(early)
+
+
 def _moves(conn):
     """Per game_id: how far the market moved since it opened, signed toward the home team / the Over (points / 10).
     ESPN's home spread is negative for a favorite, so a drop in it is the market liking the home team."""
@@ -82,52 +132,129 @@ def _moves(conn):
     return out.fillna(0)
 
 
+def _roll_adv(w, cols, upcoming):
+    """Rolling mean of `cols` over each team's previous ROLL games, minus the league average over the previous
+    LEAGUE_WEEKS weeks. `upcoming` rows (no stats) get the form of the games before them."""
+    w = pd.concat([w, upcoming[~upcoming["game_id"].isin(w["game_id"])]], ignore_index=True)
+    w = w.sort_values(["season", "week"], kind="stable")
+    for col in cols:
+        roll = w.groupby("team")[col].transform(lambda s: s.shift(1).rolling(ROLL, min_periods=3).mean())
+        weekly = w.groupby(["season", "week"])[col].agg(["sum", "count"]).sort_index()
+        league = (weekly["sum"].rolling(LEAGUE_WEEKS, min_periods=1).sum()
+                  / weekly["count"].rolling(LEAGUE_WEEKS, min_periods=1).sum()).shift(1).rename("league")
+        w = w.join(league, on=["season", "week"])
+        w[col + "_adv"] = roll - w.pop("league")
+    return w
+
+
+def _pbp_form(conn, upcoming):
+    """Per (game_id, team), from play-by-play: the offense's recent EPA per pass / rush, pressure allowed and pace,
+    and the defense's (what opponents did against it), each minus the league average. Empty if pbp isn't loaded."""
+    try:
+        o = pd.read_sql_query("SELECT game_id, season, week, team, plays, epa_pass, epa_rush, hit_rate FROM nfl_team_game_pbp"
+                              " WHERE season_type = 'REG'", conn)
+    except (sqlite3.OperationalError, pd.errors.DatabaseError) as e:
+        if _is_missing_table(e):
+            return pd.DataFrame()
+        raise
+    d = o.merge(o[["game_id", "team", "epa_pass", "epa_rush", "hit_rate"]], on="game_id", suffixes=("", "_opp"))
+    d = d[d["team"] != d["team_opp"]].drop(columns="team_opp")
+    # the opponent's numbers in this game are what this team's DEFENSE allowed / generated
+    d = d.rename(columns={"epa_pass_opp": "d_epa_pass", "epa_rush_opp": "d_epa_rush", "hit_rate_opp": "d_hit"})
+    cols = ["epa_pass", "epa_rush", "hit_rate", "plays", "d_epa_pass", "d_epa_rush", "d_hit"]
+    d = _roll_adv(d.drop_duplicates(["game_id", "team"]), cols, upcoming)
+    return d.set_index(["game_id", "team"])[[c + "_adv" for c in cols]]
+
+
 def features(conn, absences=None):
     """One row per game (played and upcoming) with every factor, signed for the home team."""
     g = game_model.games(conn)
     g = g[g["season"] >= FIRST_FIT_SEASON - 1].copy()
     ab = model.team_absences(conn, model.injury_flags(conn)) if absences is None else absences
-    form = _team_form(conn)
+    upcoming_rows = _upcoming_rows(conn)
+    form = _team_form(conn, upcoming_rows)
+    pbp = _pbp_form(conn, upcoming_rows)
     for side in ("home", "away"):
-        g = g.merge(ab[["season", "week", "team", "qb_out", "def_starters_out"]].rename(
-            columns={"team": f"{side}_team", "qb_out": f"{side}_qb", "def_starters_out": f"{side}_def_out"}),
+        g = g.merge(ab[["season", "week", "team", "qb_out"] + model.GROUP_COLUMNS].rename(
+            columns={"team": f"{side}_team", "qb_out": f"{side}_qb",
+                     **{c: f"{side}_{c}" for c in model.GROUP_COLUMNS}}),
             how="left", on=["season", "week", f"{side}_team"])
         f = form.reset_index().rename(columns={"team": f"{side}_team"})
         f = f.rename(columns={c: f"{side}_{c}" for c in f.columns if c.endswith("_adv")})
         g = g.merge(f, how="left", on=["game_id", f"{side}_team"])
+        if len(pbp):
+            q = pbp.reset_index().rename(columns={"team": f"{side}_team"})
+            q = q.rename(columns={c: f"{side}_p_{c}" for c in q.columns if c.endswith("_adv")})
+            g = g.merge(q, how="left", on=["game_id", f"{side}_team"])
     extra = pd.read_sql_query(
         "SELECT g.game_id, g.weekday, g.gametime, g.roof, coalesce(g.temp, w.temp_f) AS temp,"
-        " coalesce(g.wind, w.wind_mph) AS wind, g.home_rest, g.away_rest, g.div_game, w.indoor AS forecast_indoor"
-        " FROM nfl_games g LEFT JOIN nfl_weather w ON w.game_id = g.game_id", conn)   # forecast for upcoming games
+        " coalesce(g.wind, w.wind_mph) AS wind, g.home_rest, g.away_rest, g.div_game, w.indoor AS forecast_indoor,"
+        " coalesce(h.gust_mph, w.gust_mph) AS gust, h.precip_mm, w.precip_pct"
+        " FROM nfl_games g LEFT JOIN nfl_weather w ON w.game_id = g.game_id"
+        " LEFT JOIN nfl_weather_history h ON h.game_id = g.game_id", conn)   # forecast for upcoming games
     g = g.merge(extra, on="game_id", how="left")
-    g[["home_qb", "away_qb", "home_def_out", "away_def_out"]] = g[["home_qb", "away_qb", "home_def_out", "away_def_out"]].fillna(0)
+    counted = [f"{s}_{c}" for s in ("home", "away") for c in ["qb"] + model.GROUP_COLUMNS]
+    g[counted] = g[counted].fillna(0)
+
+    def grp(side, *names):   # starters out in the named groups for one side
+        return sum(g[f"{side}_{n}_out"] for n in names)
     out = pd.DataFrame({"game_id": g["game_id"]})
+    km, early = _travel(g)
+    out["travel_diff"] = km / 2        # a long trip helps the home team
+    out["body_clock_diff"] = early
     out["qb_diff"] = g["home_qb"] - g["away_qb"]
-    out["def_out_diff"] = (g["away_def_out"] - g["home_def_out"]).clip(-4, 4)   # opposing defenders out help the offense
     # matchup in hundreds of yards: our offense vs their defense, minus theirs vs ours
+    # a side's own missing offense hurts it; its missing defense helps the other side. Signed for the home team.
+    out["ol_diff"] = (grp("home", "ol") - grp("away", "ol")).clip(-3, 3)
+    out["skill_diff"] = (grp("home", "wr_te", "rb") - grp("away", "wr_te", "rb")).clip(-4, 4)
+    out["rush_def_diff"] = (grp("home", "pass_rush") - grp("away", "pass_rush")).clip(-3, 3)
+    out["secondary_diff"] = (grp("home", "cb", "safety") - grp("away", "cb", "safety")).clip(-4, 4)
+    out["lb_diff"] = (grp("home", "lb") - grp("away", "lb")).clip(-3, 3)
+    out["ol_total"] = (grp("home", "ol") + grp("away", "ol")).clip(0, 5)
+    out["skill_total"] = (grp("home", "wr_te", "rb") + grp("away", "wr_te", "rb")).clip(0, 6)
+    out["defense_total"] = (grp("home", "pass_rush", "lb", "cb", "safety") + grp("away", "pass_rush", "lb", "cb", "safety")).clip(0, 8)
     out["pass_match"] = ((g["home_pass_for_adv"] + g["away_pass_against_adv"])
                          - (g["away_pass_for_adv"] + g["home_pass_against_adv"])).fillna(0) / 100
     out["rush_match"] = ((g["home_rush_for_adv"] + g["away_rush_against_adv"])
                          - (g["away_rush_for_adv"] + g["home_rush_against_adv"])).fillna(0) / 100
+    def pb(col):
+        return g[col] if col in g else pd.Series(0.0, index=g.index)
+    # EPA per play: our offense against their defense, minus theirs against ours (d_* = what that defense allowed)
+    out["epa_pass_match"] = ((pb("home_p_epa_pass_adv") + pb("away_p_d_epa_pass_adv"))
+                             - (pb("away_p_epa_pass_adv") + pb("home_p_d_epa_pass_adv"))).fillna(0)
+    out["epa_rush_match"] = ((pb("home_p_epa_rush_adv") + pb("away_p_d_epa_rush_adv"))
+                             - (pb("away_p_epa_rush_adv") + pb("home_p_d_epa_rush_adv"))).fillna(0)
+    # pressure on each QB: his line's recent hit rate allowed plus the opposing rush's recent hit rate generated
+    out["pressure_match"] = ((pb("home_p_hit_rate_adv") + pb("away_p_d_hit_adv"))
+                             - (pb("away_p_hit_rate_adv") + pb("home_p_d_hit_adv"))).fillna(0)
+    out["epa_total"] = (pb("home_p_epa_pass_adv") + pb("away_p_epa_pass_adv") + pb("home_p_d_epa_pass_adv")
+                        + pb("away_p_d_epa_pass_adv") + pb("home_p_epa_rush_adv") + pb("away_p_epa_rush_adv")
+                        + pb("home_p_d_epa_rush_adv") + pb("away_p_d_epa_rush_adv")).fillna(0)
+    out["pace_total"] = (pb("home_p_plays_adv") + pb("away_p_plays_adv")).fillna(0) / 10
     out["rest_diff"] = (g["home_rest"] - g["away_rest"]).clip(-7, 7).fillna(0) / 7
     out["div_game"] = g["div_game"].fillna(0).astype(float) * np.sign(g["spread_line"].fillna(0))
     prime = model.is_prime(g["weekday"], g["gametime"])
     out["prime_favorite"] = prime * np.sign(g["spread_line"].fillna(0))          # hype: the favorite is overbet
     indoor = g["roof"].isin(["dome", "closed"]) | (g["forecast_indoor"].fillna(0) == 1)
     out["qb_total"] = g["home_qb"] + g["away_qb"]
-    out["def_out_total"] = (g["home_def_out"] + g["away_def_out"]).clip(0, 8)
     out["pass_pace"] = (g["home_pass_for_adv"] + g["away_pass_for_adv"] + g["home_pass_against_adv"]
                         + g["away_pass_against_adv"]).fillna(0) / 100
     out["rush_pace"] = (g["home_rush_for_adv"] + g["away_rush_for_adv"] + g["home_rush_against_adv"]
                         + g["away_rush_against_adv"]).fillna(0) / 100
     out["wind"] = np.where(indoor, 0.0, g["wind"].fillna(0)) / 10
+    out["gust"] = np.where(indoor, 0.0, g["gust"].fillna(0)) / 10
+    # rain: 0.5 mm or more in the three kickoff hours (past games); for a forecast, a 70%+ chance of rain
+    # shortcut: the two are different measures (an amount seen vs. a probability); revisit once forecasts are saved
+    # for a season and can be fit directly
+    out["rain"] = np.where(indoor, 0.0, ((g["precip_mm"].fillna(0) >= 0.5) | (g["precip_pct"].fillna(0) >= 70)).astype(float))
     out["cold"] = np.where(indoor, 0.0, (40 - g["temp"].fillna(60)).clip(lower=0)) / 10
     out["dome"] = indoor.astype(float)
     out["prime"] = prime
     out["short_rest"] = ((g["home_rest"].fillna(7) < 6) | (g["away_rest"].fillna(7) < 6)).astype(float)
     out = out.set_index("game_id")
-    out = out.join(_splits(conn), how="left").join(_moves(conn), how="left")
-    return out.fillna({c: 0.0 for c in ("bets_home", "gap_home", "bets_over", "gap_over", "move_home", "move_total")})
+    out = out.join(_splits(conn), how="left").join(_moves(conn), how="left").join(_referees(conn), how="left")
+    return out.fillna({c: 0.0 for c in ("bets_home", "gap_home", "bets_over", "gap_over", "move_home", "move_total",
+                                         "ref_home", "ref_total")})
 
 
 def _ridge(X, y):

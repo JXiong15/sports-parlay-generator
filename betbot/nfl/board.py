@@ -93,7 +93,10 @@ def prop_picks(conn, now=None, prices=None, flags=None, absences=None):
                 # a rising line means the market likes the Over
                 moved = None if first is None else (r["line"] - first) * (1 if over else -1)
                 market_prob = prices.prop(r["game_id"], market, r["player"], side, r["line"])
-                d = decision.decide(prob, price, other, bets, money, moved, market_prob) if price is not None else None
+                # a prop line moving 5% of itself counts like a game line moving one point
+                move_units = None if moved is None else moved / r["line"] * 20 if r["line"] else None
+                d = (decision.decide(prob, price, other, bets, money, move_units, market_prob)
+                     if price is not None else None)
                 sides.append({"side": side, "model_prob": prob, "price": price, "other_price": other,
                               "line": r["line"], "decision": d, "bets_pct": bets, "money_pct": money,
                               "line_move": moved, "market_prob": market_prob,
@@ -238,7 +241,8 @@ def game_picks(conn, now=None, prices=None, absences=None):
                 both.append({"side": side, "model_prob": prob, "line": side_line, "price": sides[name][1],
                              "other_price": other_price, "bets_pct": bets, "money_pct": money, "line_move": moved,
                              "market_prob": market_prob,
-                             "decision": decision.decide(prob, sides[name][1], other_price, bets, money, moved,
+                             # bets, money and line move are already inside the fitted game probability
+                             "decision": decision.decide(prob, sides[name][1], other_price, None, None, None,
                                                          market_prob, steam_move),
                              "steam": steam_move, "label": f"{away} @ {home}: {name}" + (f" {side_line:+g}" if market == "spread" else
                                                                      f" {side_line:g}" if market == "total" else " ML")})

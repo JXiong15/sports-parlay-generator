@@ -21,12 +21,13 @@ def test_steam_counts_books_moving_together_and_names_the_first():
     assert under is None    # no Under rows were saved
 
 
-def test_steam_against_a_pick_vetoes_it_and_steam_with_it_is_noted():
+def test_steam_moves_the_probability_with_or_against_the_pick():
     against = {"move": -1.0, "books": 4, "first_book": "x"}
-    d = decision.decide(0.6, -110, -110, steam=against)
-    assert d["market_veto"] and d["verdict"] == "STAY AWAY"
-    d = decision.decide(0.6, -110, -110, steam={"move": 1.0, "books": 4, "first_book": "x"})
-    assert d["verdict"] == "BET" and any("steam agrees" in r for r in d["reasons"])
+    d = decision.decide(0.60, -110, -110, steam=against)
+    assert abs(d["prob"] - 0.59) < 1e-9 and any("steam against" in r for r in d["reasons"])
+    d = decision.decide(0.60, -110, -110, steam={"move": 1.0, "books": 4, "first_book": "x"})
+    assert d["verdict"] == "BET" and abs(d["prob"] - 0.61) < 1e-9 and any("steam with" in r for r in d["reasons"])
+    assert decision.decide(0.60, -110, -110, steam={"move": 1.0, "books": 2, "first_book": "x"})["prob"] == 0.60
 
 
 def test_factor_fit_recovers_an_effect_and_apply_moves_the_prediction():

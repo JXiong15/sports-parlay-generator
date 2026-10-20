@@ -24,8 +24,8 @@ SHRINK = 0.5   # parlay legs trust the model only this far from the book's no-vi
 def _leg(p, s):
     """A parlay leg from board pick p and one of its sides s."""
     d = s["decision"]
-    fair = s["model_prob"] - d["edge"]
-    prob = fair + SHRINK * d["edge"]
+    fair = d["fair"]
+    prob = fair + SHRINK * (d["prob"] - fair)    # d["prob"]: our probability after the market-behavior nudges
     leg = {"label": s["label"], "prob": prob, "price": s["price"], "ev": prob * decimal_odds(s["price"]) - 1,
            "edge": prob - fair, "game": p["game_id"], "side": s["side"], "market": p["market"],
            "line": p.get("line")}
@@ -44,10 +44,9 @@ def legs(picks):
 
 
 def best_legs(picks):
-    """The side the model favors on every pick, positive EV or not, for the 'best available' view, minus picks the
-    market-behavior rules veto (sharp money on the other side, the line moving against us, a bait line, Kalshi
-    disagreeing)."""
-    return [_leg(p, p) for p in picks if p["price"] is not None and not p["decision"].get("market_veto")]
+    """The side the model favors on every pick, positive EV or not, for the 'best available' view. Market behavior
+    is already weighed into each leg's probability."""
+    return [_leg(p, p) for p in picks if p["price"] is not None]
 
 
 def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV):

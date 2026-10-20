@@ -36,7 +36,8 @@ STATS = {
 }
 FEATURES = ["def_vs_pos", "implied_points", "spread", "wind", "cold", "home", "usage_trend",
             "snap_pct", "starter_flag",
-            "questionable", "limited_practice", "qb_out", "opp_def_starters_out", "rest", "prime", "div_game"]
+            "questionable", "limited_practice", "qb_out", "opp_def_starters_out", "rest", "prime", "div_game",
+            "ol_out", "opp_secondary_out", "opp_rush_out"]
 MISSING = ("Out", "Doubtful", "Injured Reserve")
 
 
@@ -112,6 +113,61 @@ def _recent_qb_out(conn, qbs, upcoming, games=8):
     return pd.DataFrame(rows, columns=["season", "week", "team", "recent_qb_out"])
 
 
+# position groups whose missing starters matter differently: (positions, snap column that defines a starter)
+GROUPS = {"ol": (("T", "G", "C", "OL", "OT", "OG"), "offense_pct"), "wr_te": (("WR", "TE"), "offense_pct"),
+          "rb": (("RB", "FB", "HB"), "offense_pct"), "pass_rush": (("DE", "DT", "NT", "DL"), "defense_pct"),
+          "lb": (("LB", "ILB", "OLB", "MLB"), "defense_pct"), "cb": (("CB", "DB"), "defense_pct"),
+          "safety": (("S", "FS", "SS"), "defense_pct")}
+GROUP_COLUMNS = [f"{g}_out" for g in GROUPS]
+
+
+def group_absences(conn, out, team_weeks, upcoming=None):
+    """Per (season, week, team): how many starters (60%+ of snaps over the previous 3 games) are Out / Doubtful / IR,
+    by position group. `out` has (season, week, player_id) of players listed out; `team_weeks` is every
+    (season, week, team) to report. For upcoming games, today's ESPN list (which includes players on IR, who never
+    appear in practice reports) counts for each team's next game."""
+    empty = pd.DataFrame(columns=["season", "week", "team"] + GROUP_COLUMNS)
+    try:
+        snaps = pd.read_sql_query(
+            "SELECT s.season, s.week, s.team, p.gsis_id AS player_id, s.position, s.offense_pct, s.defense_pct"
+            " FROM nfl_snap_counts s JOIN nfl_players p ON p.pfr_id = s.pfr_player_id", conn)
+    except (sqlite3.OperationalError, pd.errors.DatabaseError) as e:
+        if "no such table" in str(e):
+            return empty
+        raise
+    if snaps.empty:
+        return empty
+    snaps["position"] = snaps["position"].fillna("").str.split("/").str[0]    # "C/G" counts as the first label
+    snaps = snaps.sort_values(["player_id", "season", "week"])
+    for column in ("offense_pct", "defense_pct"):       # each player's average over his previous 3 games' snaps
+        played = snaps[column].where(snaps[column] > 0)
+        snaps[f"recent_{column}"] = played.groupby(snaps["player_id"]).transform(
+            lambda x: x.rolling(3, min_periods=2).mean())
+    tw = team_weeks[["season", "week", "team"]].drop_duplicates().sort_values(["team", "season", "week"])
+    tw["next_season"] = tw.groupby("team")["season"].shift(-1)
+    tw["next_week"] = tw.groupby("team")["week"].shift(-1)
+    out = out[["season", "week", "player_id"]].assign(out=1)
+    espn = pd.DataFrame(columns=["season", "week", "player_id", "out"])
+    if upcoming is not None and len(upcoming):
+        nxt = upcoming[["season", "week", "team"]].drop_duplicates().sort_values(["season", "week"]).groupby("team").head(1)
+        listed = pd.read_sql_query(
+            f"SELECT i.team, p.gsis_id AS player_id FROM nfl_injuries i JOIN nfl_players p"
+            f" ON lower(p.display_name) = lower(i.player) WHERE i.status IN ({', '.join('?' * len(MISSING))})",
+            conn, params=list(MISSING))
+        espn = listed.merge(nxt, on="team")[["season", "week", "player_id"]].assign(out=1)
+    out = pd.concat([out, espn]).drop_duplicates(["season", "week", "player_id"])
+    parts = []
+    for group, (positions, column) in GROUPS.items():
+        s = snaps[snaps["position"].isin(positions) & (snaps[column] > 0) & (snaps[f"recent_{column}"] >= 0.6)]
+        s = s[["season", "week", "team", "player_id"]]
+        # a starter as of week w is listed for his team's next game
+        s = s.merge(tw, on=["season", "week", "team"]).dropna(subset=["next_week"])
+        s = s.assign(season=s["next_season"].astype(int), week=s["next_week"].astype(int))
+        c = s.merge(out, on=["season", "week", "player_id"]).groupby(["season", "week", "team"]).size()
+        parts.append(c.rename(f"{group}_out"))
+    return pd.concat(parts, axis=1).fillna(0).reset_index()
+
+
 def team_absences(conn, flags, upcoming=None):
     """Per (season, week, team): qb_out (last game's QB listed Out/Doubtful) and def_starters_out (players with
     60%+ of defensive snaps over the team's previous 3 games listed Out/Doubtful)."""
@@ -152,7 +208,11 @@ def team_absences(conn, flags, upcoming=None):
         d = d.rename("def_starters_out").reset_index()
     else:
         d = pd.DataFrame(columns=["season", "week", "team", "def_starters_out"])
-    return qb.merge(d, how="left", on=["season", "week", "team"]).fillna({"def_starters_out": 0})
+    res = qb.merge(d, how="left", on=["season", "week", "team"]).fillna({"def_starters_out": 0})
+    groups = group_absences(conn, out.drop(columns="out"), qb, upcoming)
+    res = res.merge(groups, how="left", on=["season", "week", "team"])
+    res[GROUP_COLUMNS] = res.reindex(columns=GROUP_COLUMNS).fillna(0)
+    return res
 
 
 # ---------- features ----------
@@ -278,6 +338,11 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
         columns={"team": "opponent_team", "def_starters_out": "opp_def_starters_out"}),
         how="left", on=["season", "week", "opponent_team"])
 
+    if "ol_out" in teams:
+        df = df.merge(teams[["season", "week", "team", "ol_out"]], how="left", on=["season", "week", "team"])
+        opp = teams.assign(opp_secondary_out=teams["cb_out"] + teams["safety_out"], opp_rush_out=teams["pass_rush_out"])
+        df = df.merge(opp[["season", "week", "team", "opp_secondary_out", "opp_rush_out"]].rename(columns={"team": "opponent_team"}),
+                      how="left", on=["season", "week", "opponent_team"])
     df["implied_points"] = np.log(df["implied_points"].fillna(22.0).clip(lower=3) / 22.0)
     df["spread"] = df["spread"].fillna(0.0) / 7.0
     df["wind"] = (df["wind"].fillna(0.0) - 10).clip(lower=0) / 10.0
@@ -293,7 +358,7 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
     df = df.merge(typical, how="left", on=["position_group", "season"])
     df["snap_pct"] = df["snap_recent"].fillna(df["snap_ewm"]).fillna(df["typical_snap"]).fillna(0.5)
     df["starter_flag"] = (df["snap_pct"] >= 0.6).astype(float)
-    for col in ("rest", "prime", "div_game"):   # a context without them (older tests) counts as no effect
+    for col in ("rest", "prime", "div_game", "ol_out", "opp_secondary_out", "opp_rush_out"):   # missing = no effect
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0) if col in df else 0.0
     for col in ("questionable", "limited_practice", "qb_out", "opp_def_starters_out", "home"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.5 if col == "home" else 0.0)

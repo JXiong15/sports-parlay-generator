@@ -28,9 +28,11 @@ def test_rho_signs_follow_the_sides():
 
 
 def test_legs_and_conflicts():
-    picks = [{"decision": {"verdict": "BET", "ev": 0.05, "edge": 0.04}, "label": "x", "model_prob": 0.56, "price": -110,
+    picks = [{"decision": {"verdict": "BET", "ev": 0.05, "edge": 0.04, "fair": 0.52, "prob": 0.56}, "label": "x",
+              "model_prob": 0.56, "price": -110,
               "game_id": "2026_06_DAL_GB", "side": "home", "market": "spread", "kind": "game"},
-             {"decision": {"verdict": "STAY AWAY", "ev": 0.08, "edge": 0.06}, "label": "y", "model_prob": 0.6, "price": -110,
+             {"decision": {"verdict": "STAY AWAY", "ev": 0.08, "edge": 0.06, "fair": 0.54, "prob": 0.6}, "label": "y",
+              "model_prob": 0.6, "price": -110,
               "game_id": "2026_06_DAL_GB", "side": "over", "market": "total", "kind": "game"}]
     legs = parlays.legs(picks)
     assert len(legs) == 1 and legs[0]["home"] == "GB" and legs[0]["away"] == "DAL"
@@ -72,10 +74,12 @@ def test_hunt_leg_names_the_side_actually_bet():
     assert legs[0]["side"] == "home" and legs[0]["label"] == "DAL @ GB: Green Bay Packers ML"
 
 
-def test_hunt_still_applies_market_checks():
-    # sharp money on the other side: 70% of the money vs 30% of the bets -> STAY AWAY, so no leg
-    legs = parlays.hunt_legs([game_pick(0.60, bets_pct=70, money_pct=30)], min_conv=0.12)
-    assert legs == []
+def test_hunt_weighs_market_behavior_into_the_leg_instead_of_dropping_it():
+    # sharp money on the other side (70% of the money on 30% of the bets) lowers the leg's chance; a thin one drops out
+    plain = parlays.hunt_legs([game_pick(0.60)], min_conv=0.12)[0]
+    sharp = parlays.hunt_legs([game_pick(0.60, bets_pct=70, money_pct=30)], min_conv=0.12)[0]
+    assert sharp["prob"] < plain["prob"]
+    assert parlays.hunt_legs([game_pick(0.45, bets_pct=70, money_pct=30)], min_conv=0.12) == []
 
 
 def test_ask_keeps_default_on_enter_and_retries_bad_input(monkeypatch):

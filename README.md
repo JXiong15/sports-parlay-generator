@@ -205,6 +205,10 @@ Optional settings in `.env`:
 
 ## Commands
 
+Free data the game model uses (run once, then they update): `.venv/bin/python -m betbot.nfl.collectors.pbp` (nflverse
+play-by-play: EPA, pressure, pace) and `.venv/bin/python -m betbot.nfl.collectors.weather_history` (rain and wind gusts
+at past kickoffs, from Open-Meteo; the free archive rate-limits, so it waits and retries).
+
 ```
 .venv/bin/python -m betbot.main                         # full run (uses Odds API credits)
 .venv/bin/python -m betbot.nfl.signals.regression       # show picks from saved data (free)

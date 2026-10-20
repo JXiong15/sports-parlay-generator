@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS prop_splits (  -- % of handle (money) and % of bets o
     over_bets REAL,
     under_bets REAL
 );
+CREATE TABLE IF NOT EXISTS nfl_weather_history (  -- Open-Meteo archive: rain and gusts in the 3 hours from kickoff
+    game_id TEXT PRIMARY KEY,
+    precip_mm REAL,
+    gust_mph REAL
+);
+CREATE TABLE IF NOT EXISTS nfl_team_game_pbp (  -- nflverse play-by-play reduced to one offense row per team per game
+    game_id TEXT, season INTEGER, week INTEGER, season_type TEXT, team TEXT, plays INTEGER, pass_rate REAL,
+    epa_pass REAL, epa_rush REAL, success_rate REAL, pass_oe REAL, rz_plays REAL, sack_rate REAL, hit_rate REAL,
+    PRIMARY KEY (game_id, team)
+);
 CREATE TABLE IF NOT EXISTS nfl_venues (  -- geocoded once per city
     city TEXT NOT NULL,
     state TEXT,
