@@ -21,12 +21,13 @@ SHARP_GAP = 10       # money % minus bets % on one side that marks sharp money
 PUBLIC_HEAVY = 70    # % of bets that marks a heavy public side
 BAIT = 85            # % of bets on our side with no line move for them
 SHARP_MARKET_GAP = 0.03  # prediction-market probability this far below the book's no-vig price = disagrees
+STEAM_BOOKS, STEAM_MOVE = 3, 0.5  # books moving the same way, and points, that make a line move "steam"
 NO_EDGE_WARNING = ("Backtest found no proven edge (game lines at coin-flip accuracy; props break-even on real "
                    "lines): research only, not a likely winner.")
 
 
 def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, line_moved_for_us=None,
-           market_prob=None):
+           market_prob=None, steam=None):
     """model_prob: our probability this side wins. bets_pct / money_pct: % on OUR side (the other side is the
     rest). line_moved_for_us: points (or % of a prop line) the line moved toward our side since it opened;
     negative = against us. market_prob: a prediction market's probability for our side (traders, no margin).
@@ -35,29 +36,37 @@ def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, l
     ev = expected_value(model_prob, price)
     edge = model_prob - fair
     out = {"verdict": "STAY AWAY", "ev": round(ev, 4), "edge": round(edge, 4), "fair": round(fair, 4),
-           "reasons": [], "warning": NO_EDGE_WARNING}
-    if ev < MIN_EV or edge < MIN_EDGE:
-        out["reasons"].append(f"no clear edge (EV {ev:+.1%}, edge {edge:+.1%} vs. book's no-vig {fair:.1%})")
-        return out
+           "reasons": [], "warning": NO_EDGE_WARNING, "market_veto": False}
+    # market behavior is read for every pick, so a pick without an edge still shows whether the market is against it
     sharp_us = sharp_them = public_on_them = False
+    veto = None
     if bets_pct is not None and money_pct is not None:
         sharp_us = money_pct - bets_pct >= SHARP_GAP
         sharp_them = (100 - money_pct) - (100 - bets_pct) >= SHARP_GAP
         public_on_them = 100 - bets_pct >= PUBLIC_HEAVY
         if sharp_them:
-            out["reasons"].append(f"sharp money on the other side ({100 - money_pct:.0f}% of money vs."
-                                  f" {100 - bets_pct:.0f}% of bets)")
-            return out
-    if bets_pct is not None and bets_pct >= BAIT and line_moved_for_us is not None and line_moved_for_us <= 0:
-        out["reasons"].append(f"bait pattern: {bets_pct:.0f}% of bets on our side but the line hasn't moved for them")
+            veto = (f"sharp money on the other side ({100 - money_pct:.0f}% of money vs."
+                    f" {100 - bets_pct:.0f}% of bets)")
+    if veto is None and bets_pct is not None and bets_pct >= BAIT and line_moved_for_us is not None \
+            and line_moved_for_us <= 0:
+        veto = f"bait pattern: {bets_pct:.0f}% of bets on our side but the line hasn't moved for them"
+    if veto is None and line_moved_for_us is not None and line_moved_for_us < 0:
+        veto = f"line moved against us since it opened ({line_moved_for_us:+g})"
+    if veto is None and market_prob is not None and market_prob < fair - SHARP_MARKET_GAP:
+        veto = f"prediction market prices our side at {market_prob:.1%}, below the book's {fair:.1%}"
+    if veto is None and steam and steam["books"] >= STEAM_BOOKS and steam["move"] <= -STEAM_MOVE:   # never bet against steam
+        veto = (f"steam against us: {steam['books']} books moved {abs(steam['move']):g} point(s) the other way,"
+                f" {steam['first_book']} first")
+    out["market_veto"] = veto is not None
+    if ev < MIN_EV or edge < MIN_EDGE:
+        out["reasons"].append(f"no clear edge (avg return {ev:+.1%}, edge {edge:+.1%} vs. book's no-vig {fair:.1%})")
+        if veto:
+            out["reasons"].append(veto)
         return out
-    if line_moved_for_us is not None and line_moved_for_us < 0:
-        out["reasons"].append(f"line moved against us since it opened ({line_moved_for_us:+g})")
+    if veto:
+        out["reasons"].append(veto)
         return out
-    if market_prob is not None and market_prob < fair - SHARP_MARKET_GAP:
-        out["reasons"].append(f"prediction market prices our side at {market_prob:.1%}, below the book's {fair:.1%}")
-        return out
-    out["reasons"].append(f"EV {ev:+.1%}, edge {edge:+.1%} over the book's no-vig {fair:.1%}")
+    out["reasons"].append(f"avg return {ev:+.1%}, edge {edge:+.1%} over the book's no-vig {fair:.1%}")
     if public_on_them and sharp_us:
         out["verdict"] = "FADE"
         out["reasons"].append(f"fading the public ({100 - bets_pct:.0f}% of bets on the other side) with sharp"
@@ -68,4 +77,7 @@ def decide(model_prob, price, other_price=None, bets_pct=None, money_pct=None, l
             out["reasons"].append("sharp money agrees")
     if market_prob is not None and market_prob >= fair + SHARP_MARKET_GAP:
         out["reasons"].append(f"prediction market agrees ({market_prob:.1%})")
+    if steam and steam["books"] >= STEAM_BOOKS and steam["move"] >= STEAM_MOVE:
+        out["reasons"].append(f"steam agrees: {steam['books']} books moved {steam['move']:g} point(s) our way,"
+                              f" {steam['first_book']} first")
     return out

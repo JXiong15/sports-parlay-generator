@@ -182,13 +182,17 @@ def collect():
                 print(f"parlays failed: {e.__class__.__name__}: {e}")
                 traceback.print_exc()
         try:
-            # the default view: only props scoring 95+ with a hit rate that beats the book, and parlays from them
-            chosen = conviction.run(conn, picks)
-            conviction.log_picks(conn, chosen)
-            if not chosen:  # nothing cleared the bar: still show the least-bad picks, labeled
-                available, results = parlays.best_available(conn, picks)
-                parlays.print_best_available(available, results)
-                parlays.log(conn, results)
+            # default view: the best parlay (PARLAY_LEGS legs, PARLAY_STAKE dollars); the 95+ picks are still logged
+            legs, stake = int(os.getenv("PARLAY_LEGS", "3")), float(os.getenv("PARLAY_STAKE", "100"))
+            available, results = parlays.best_available(conn, picks, max_legs=legs, top=1, stake=stake)
+            parlays.print_best_available(available, results, stake=stake)
+            parlays.log(conn, results)
+        except Exception as e:
+            print(f"parlay view failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):  # still logged for grading, no longer the headline
+                conviction.log_picks(conn, conviction.run(conn, picks))
         except Exception as e:
             print(f"conviction failed: {e.__class__.__name__}: {e}")
             traceback.print_exc()

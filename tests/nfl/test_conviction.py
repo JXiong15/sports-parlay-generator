@@ -137,7 +137,7 @@ def test_report_for_a_pick_has_every_field(capsys):
     conviction.print_report(picks, 118, [], tables())
     out = capsys.readouterr().out
     for piece in ("A B", "pass_yds 240.5 Over", "draftkings -110", "Score 96 | hits 62% historically (58 props",
-                  "book implied 50.0%", "EV +", "per $100", "why: x"):
+                  "book implied 50.0%", "avg return +", "per $100", "why: x"):
         assert piece in out
 
 

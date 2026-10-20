@@ -44,8 +44,10 @@ def legs(picks):
 
 
 def best_legs(picks):
-    """The side the model favors on every pick, positive EV or not: for the 'best available' view."""
-    return [_leg(p, p) for p in picks if p["price"] is not None]
+    """The side the model favors on every pick, positive EV or not, for the 'best available' view, minus picks the
+    market-behavior rules veto (sharp money on the other side, the line moving against us, a bait line, Kalshi
+    disagreeing)."""
+    return [_leg(p, p) for p in picks if p["price"] is not None and not p["decision"].get("market_veto")]
 
 
 def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV):
@@ -97,15 +99,20 @@ def best_available(conn, picks, max_legs=2, top=5, stake=100.0, profit=None):
     return available, results[:top]
 
 
-def print_best_available(available, results, top=5, stake=100.0):
-    print("\nBEST AVAILABLE (below the bar; EV can be negative, so these are NOT recommendations)")
-    for leg in available[:top]:
-        print(f"  {leg['label']} ({leg['price']:+d}): ours {leg['prob']:.1%}, EV {leg['ev']:+.1%}")
+def print_best_available(available, results, top=5, stake=100.0, legs=False):
+    """The best parlays. 'Avg return' is what a bet like this pays back on average, per dollar bet, after wins and
+    losses: below 0% means you lose money over many bets."""
+    print(decision.NO_EDGE_WARNING)
+    print("\nBEST PARLAY" + ("S" if len(results) > 1 else ""))
+    if legs:
+        for leg in available[:top]:
+            print(f"  {leg['label']} ({leg['price']:+d}): ours {leg['prob']:.1%}, avg return {leg['ev']:+.1%}")
     if not results:
         print("\n  No parlay meets that.")
     for r in results:
         print(f"\n  {len(r['legs'])} legs at {r['price']:+d}: ${stake:,.0f} wins ${(r['decimal'] - 1) * stake:,.2f},"
-              f" true chance {r['true_prob']:.1%}, EV {r['ev']:+.1%} (${r['ev'] * stake:+,.2f} expected)")
+              f" chance it hits {r['true_prob']:.1%}, avg return {r['ev']:+.1%}"
+              f" (about ${r['ev'] * stake:+,.2f} per ${stake:,.0f} bet)")
         for leg in r["legs"]:
             print(f"      {leg['label']} ({leg['price']:+d}, ours {leg['prob']:.1%})")
 
@@ -180,13 +187,13 @@ def print_parlays(results, available, hunt=False, min_price=MIN_PRICE, max_price
         print(f"Hunt: legs priced +{min_price} to +{max_price} with an edge of {min_conv:.0%}+ over the book's"
               f" no-vig price: {len(available)} found")
     else:
-        print(f"{len(available)} positive-EV legs available")
+        print(f"{len(available)} legs with a positive average return")
     if not results:
-        print("No positive-EV parlays.")
+        print("No parlays with a positive average return.")
     for r in results:
         print(f"\n{len(r['legs'])} legs at {r['price']:+d} (${(r['decimal'] - 1) * 100:,.0f} profit per $100):"
               f" true chance {r['true_prob']:.1%} (independent would be {r['independent_prob']:.1%}),"
-              f" conviction {r['conviction']:+.1%}, EV {r['ev']:+.1%}"
+              f" conviction {r['conviction']:+.1%}, avg return {r['ev']:+.1%}"
               + (" | same-game: books usually pay less than these multiplied odds" if r["same_game"] else ""))
         for leg in r["legs"]:
             print(f"    {leg['label']} ({leg['price']:+d}, ours {leg['prob']:.1%}, edge {leg['edge']:+.1%})")
@@ -201,7 +208,7 @@ def main(argv=None):
     ap.add_argument("--legs", type=int, default=None, help="most legs per parlay (fewer legs hit more often); --best builds exactly this many")
     ap.add_argument("--stake", type=float, default=None, help="--best: your bet amount in dollars")
     ap.add_argument("--profit", type=float, default=None, help="--best: only parlays that win at least this much on the stake")
-    ap.add_argument("--best", action="store_true", help="show the least-bad picks and parlays even if EV is negative")
+    ap.add_argument("--best", action="store_true", help="show the best parlays even if the average return is negative")
     ap.add_argument("--record", action="store_true", help="show settled parlays vs predicted chance, then exit")
     args = ap.parse_args(argv)
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))

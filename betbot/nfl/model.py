@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+from betbot.names import normalize
+
 HALFLIFE = 6          # games; how fast older games fade from the baseline
 SHRINK_GAMES = 2      # pseudo-games of the position average added to a player's baseline
 MIN_PRIOR_GAMES = 4   # training rows need at least this many previous games
@@ -34,7 +36,7 @@ STATS = {
 }
 FEATURES = ["def_vs_pos", "implied_points", "spread", "wind", "cold", "home", "usage_trend",
             "snap_pct", "starter_flag",
-            "questionable", "limited_practice", "qb_out", "opp_def_starters_out"]
+            "questionable", "limited_practice", "qb_out", "opp_def_starters_out", "rest", "prime", "div_game"]
 MISSING = ("Out", "Doubtful", "Injured Reserve")
 
 
@@ -49,11 +51,18 @@ def history(conn, stat, positions, first_season=FIRST_SEASON):
         conn, params=(first_season, *positions))
 
 
+def is_prime(weekday, gametime):
+    """1.0 for Monday / Thursday games and anything kicking off 7pm or later (the hype games), else 0.0."""
+    return (weekday.isin(["Monday", "Thursday"]) | (gametime.fillna("13:00") >= "19:00")).astype(float)
+
+
 def game_context(conn):
     """Per (game_id, team): implied points, spread from the team's side (negative = favored), home, weather."""
     g = pd.read_sql_query(
         "SELECT game_id, season, week, home_team, away_team, home_implied_points, away_implied_points,"
-        " home_spread, wind_mph, temp_f, roof FROM nfl_game_context", conn)
+        " home_spread, wind_mph, temp_f, roof, home_rest, away_rest, div_game, weekday, gametime"
+        " FROM nfl_game_context", conn)
+    prime = is_prime(g["weekday"], g["gametime"])
     outdoors = g["roof"].isin(["outdoors", "open"]) | g["roof"].isna()
     rows = []
     for side, other in (("home", "away"), ("away", "home")):
@@ -61,7 +70,9 @@ def game_context(conn):
             "game_id": g["game_id"], "team": g[f"{side}_team"], "home": 1 if side == "home" else 0,
             "implied_points": g[f"{side}_implied_points"],
             "spread": g["home_spread"] if side == "home" else -g["home_spread"],
-            "wind": np.where(outdoors, g["wind_mph"], 0.0), "temp": np.where(outdoors, g["temp_f"], 70.0)}))
+            "wind": np.where(outdoors, g["wind_mph"], 0.0), "temp": np.where(outdoors, g["temp_f"], 70.0),
+            "rest": ((g[f"{side}_rest"] - g[f"{other}_rest"]).clip(-7, 7) / 7).fillna(0.0),
+            "prime": prime, "div_game": g["div_game"].fillna(0).astype(float)}))
     return pd.concat(rows, ignore_index=True)
 
 
@@ -80,12 +91,33 @@ def injury_flags(conn):
         questionable=("questionable", "max"), limited_practice=("limited_practice", "max"), status=("status", "first"))
 
 
+def _recent_qb_out(conn, qbs, upcoming, games=8):
+    """1 for each upcoming (season, week, team) whose QB with the most attempts over its last `games` games (the one
+    the team's ratings reflect) is on ESPN's current Out / Doubtful / IR list. The previous-game check misses a QB
+    who has already been out a game, since his backup is then the 'previous starter'."""
+    placeholders = ", ".join("?" * len(MISSING))
+    out = {n for (n,) in conn.execute(f"SELECT name_key FROM nfl_injuries WHERE position = 'QB' AND status IN"
+                                      f" ({placeholders})", MISSING)}
+    rows = []
+    # today's list is a snapshot for each team's next game only, not for weeks further out
+    nxt = upcoming[["season", "week", "team"]].drop_duplicates().sort_values(["season", "week"]).groupby("team").head(1)
+    for season, week, team in nxt.itertuples(index=False):
+        past = qbs[(qbs["team"] == team) & ((qbs["season"] < season) | ((qbs["season"] == season) & (qbs["week"] < week)))]
+        last = past[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).tail(games)
+        recent = past.merge(last)
+        if recent.empty:
+            continue
+        top = recent.groupby("name")["attempts"].sum().idxmax()
+        rows.append((season, week, team, float(normalize(top) in out)))
+    return pd.DataFrame(rows, columns=["season", "week", "team", "recent_qb_out"])
+
+
 def team_absences(conn, flags, upcoming=None):
     """Per (season, week, team): qb_out (last game's QB listed Out/Doubtful) and def_starters_out (players with
     60%+ of defensive snaps over the team's previous 3 games listed Out/Doubtful)."""
     out = flags[flags["status"].isin(MISSING)][["season", "week", "player_id"]].assign(out=1)
-    qbs = pd.read_sql_query("SELECT season, week, team, player_id, attempts FROM nfl_player_weeks"
-                            " WHERE position_group = 'QB' AND attempts > 0", conn)
+    qbs = pd.read_sql_query("SELECT season, week, team, player_id, player_display_name AS name, attempts"
+                            " FROM nfl_player_weeks WHERE position_group = 'QB' AND attempts > 0", conn)
     starter = qbs.sort_values("attempts").groupby(["season", "week", "team"]).tail(1)
     weeks = starter[["season", "week", "team"]]
     if upcoming is not None and len(upcoming):
@@ -95,6 +127,10 @@ def team_absences(conn, flags, upcoming=None):
     weeks["prior_qb"] = weeks.groupby("team")["player_id"].shift(1)
     weeks = weeks.merge(out.rename(columns={"player_id": "prior_qb"}), how="left", on=["season", "week", "prior_qb"])
     qb = weeks.assign(qb_out=weeks["out"].fillna(0))[["season", "week", "team", "qb_out"]]
+    if upcoming is not None and len(upcoming):  # today's ESPN list: the QB behind the team's recent results is out
+        qb = qb.merge(_recent_qb_out(conn, qbs, upcoming), how="left", on=["season", "week", "team"])
+        qb["qb_out"] = qb[["qb_out", "recent_qb_out"]].max(axis=1)
+        qb = qb.drop(columns="recent_qb_out")
 
     try:
         snaps = pd.read_sql_query(
@@ -257,6 +293,8 @@ def features(conn, stat, positions, upcoming=None, first_season=FIRST_SEASON, df
     df = df.merge(typical, how="left", on=["position_group", "season"])
     df["snap_pct"] = df["snap_recent"].fillna(df["snap_ewm"]).fillna(df["typical_snap"]).fillna(0.5)
     df["starter_flag"] = (df["snap_pct"] >= 0.6).astype(float)
+    for col in ("rest", "prime", "div_game"):   # a context without them (older tests) counts as no effect
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0) if col in df else 0.0
     for col in ("questionable", "limited_practice", "qb_out", "opp_def_starters_out", "home"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.5 if col == "home" else 0.0)
     return df
@@ -326,6 +364,30 @@ def _logit(p):
 def recalibrate(p, calib):
     a, b = calib
     return 1 / (1 + np.exp(-(a + b * _logit(p))))
+
+
+def fit_public_discount(p, lean, gap, won, ridge=20.0):
+    """Hype discount: how the public's side moves P(Over) beyond our probability p. logit(P) = logit(p) + a*lean +
+    b*gap, where lean = (% of tickets on the Over - 50) / 50 and gap = (% of handle - % of tickets) / 50. A strong
+    ridge keeps (a, b) at zero until the data says otherwise. Returns (a, b)."""
+    off = _logit(p)
+    X = np.column_stack([np.asarray(lean, float), np.asarray(gap, float)])
+    y = np.asarray(won, dtype=float)
+    w = np.zeros(2)
+    for _ in range(50):
+        mu = 1 / (1 + np.exp(-(off + X @ w)))
+        grad = X.T @ (mu - y) + ridge * w
+        hess = (X * (mu * (1 - mu))[:, None]).T @ X + ridge * np.eye(2)
+        step = np.linalg.solve(hess, grad)
+        w -= step
+        if np.abs(step).max() < 1e-8:
+            break
+    return float(w[0]), float(w[1])
+
+
+def apply_public_discount(p, lean, gap, coef):
+    a, b = coef
+    return 1 / (1 + np.exp(-(_logit(p) + a * lean + b * gap)))
 
 
 def fit_recalibration(p, won, ridge=1.0):

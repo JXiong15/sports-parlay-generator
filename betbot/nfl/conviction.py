@@ -461,7 +461,7 @@ def parlays_for(conn, picks, max_legs=3, top=10):
 
 def format_pick(p):
     return (f"{p['player']} | {p['market'].replace('player_', '')} {p['line']:g} {p['side']} | {p['book']} "
-            f"{p['price']:+d} | {p['evidence']} | book implied {p['fair']:.1%} | EV {p['ev100']:+.0f} per $100\n"
+            f"{p['price']:+d} | {p['evidence']} | book implied {p['fair']:.1%} | avg return {p['ev100']:+.0f} per $100\n"
             f"    why: {p['why']}")
 
 
@@ -478,11 +478,11 @@ def print_report(picks, checked, parlay_results, tables):
     for p in picks:
         print("\n" + format_pick(p))
     if not parlay_results:
-        print("\nNo positive-EV parlays from these picks.")
+        print("\nNo parlays with a positive average return from these picks.")
     for r in parlay_results:
         print(f"\n{len(r['legs'])} legs at {r['price']:+d}: pays ${(r['decimal'] - 1) * 100:,.0f} per $100,"
               f" true chance {r['true_prob']:.1%} from the hit rates (independent would be {r['independent_prob']:.1%}),"
-              f" EV {r['ev']:+.1%}"
+              f" avg return {r['ev']:+.1%}"
               + (" | same-game: books usually pay less than these multiplied odds" if r["same_game"] else ""))
         for leg in r["legs"]:
             print(f"    {leg['label']} ({leg['price']:+d}, hits {leg['prob']:.0%})")

@@ -7,9 +7,10 @@ from statistics import multimode
 from betbot import db, decision, predictions
 from betbot.collectors import odds_api
 from betbot.names import normalize
-from betbot.nfl import game_model, model
+from betbot.nfl import game_factors, game_model, model
 from betbot.nfl.collectors import kalshi
 from betbot.nfl.backtest import REAL_LINE_CALIBRATION
+from betbot.nfl import steam
 from betbot.nfl.signals import regression
 from betbot.nfl.teams import TEAMS
 
@@ -51,15 +52,16 @@ def _upcoming_team_weeks(conn, now):
     return pd.DataFrame([(s, w, t) for s, w, h, a in rows for t in (h, a)], columns=["season", "week", "team"])
 
 
-def prop_picks(conn, now=None, prices=None):
+def prop_picks(conn, now=None, prices=None, flags=None, absences=None):
     """regression.evaluate for every market with lines, probabilities recalibrated on real sportsbook lines."""
     now = now or _now()
     real = model.load_params(conn, REAL_LINE_CALIBRATION)
     markets = [m for (m,) in conn.execute("SELECT DISTINCT market FROM lines") if m in regression.MARKETS]
-    flags = model.injury_flags(conn)
+    flags = model.injury_flags(conn) if flags is None else flags
+    absences = model.team_absences(conn, flags, _upcoming_team_weeks(conn, now)) if absences is None else absences
     shared = {"context": model.game_context(conn), "flags": flags, "snaps": model.snap_shares(conn),
               "form": model.team_form(conn),  # built once
-              "absences": model.team_absences(conn, flags, _upcoming_team_weeks(conn, now))}
+              "absences": absences}
     prices = prices or kalshi.Prices(conn, now)
     out = []
     for market in markets:
@@ -69,11 +71,16 @@ def prop_picks(conn, now=None, prices=None):
                 continue
             r["p_over_model"] = r["p_over"]
             if real:
-                r["p_over"] = round(float(model.recalibrate(r["p_over"], real["calib"])), 3)
+                calib = real.get("by_market", {}).get(market, real["calib"])
+                r["p_over"] = round(float(model.recalibrate(r["p_over"], calib)), 3)
+            splits = _prop_splits(conn, r["player"], market, r["line"])
+            if real and splits and splits[0] is not None:   # hype discount: the public's side, as fitted on past props
+                gap = ((splits[1] - splits[0]) / 50) if splits[1] is not None else 0.0
+                r["p_over"] = round(float(model.apply_public_discount(
+                    r["p_over"], (splits[0] - 50) / 50, gap, real.get("public_discount", (0.0, 0.0)))), 3)
             pick = predictions.prop_pick(r)
             if pick is None:
                 continue
-            splits = _prop_splits(conn, r["player"], market, r["line"])
             first = _prop_first_line(conn, r)
             sides = []
             for side, prob, price, other in (("Over", r["p_over"], r["over_price"], r["under_price"]),
@@ -160,9 +167,11 @@ def _game_splits(conn, home, market, side, kickoff):
     return row if row else (None, None)
 
 
-def game_picks(conn, now=None, prices=None):
+def game_picks(conn, now=None, prices=None, absences=None):
     now = now or _now()
-    g = game_model.predict(game_model.games(conn))
+    if absences is None:
+        absences = model.team_absences(conn, model.injury_flags(conn), _upcoming_team_weeks(conn, now))
+    g = game_factors.adjusted(conn, absences)   # ratings + matchups, injuries, weather, rest, hype, QB out
     calib = _game_calibrations(g)
     prices = prices or kalshi.Prices(conn, now)
     by_game = g.set_index("game_id")
@@ -224,13 +233,14 @@ def game_picks(conn, now=None, prices=None):
                     moved = (lines[3] - lines[2]) * (1 if side == "over" else -1)
                 side_line = sides[name][0] if market != "moneyline" else None
                 market_prob = prices.game(game[0], market, side, side_line)
+                steam_move = steam.game_steam(conn, event_id, odds_market, name)
                 other_price = _matching_other_price(market, sides[name], sides[other])
                 both.append({"side": side, "model_prob": prob, "line": side_line, "price": sides[name][1],
                              "other_price": other_price, "bets_pct": bets, "money_pct": money, "line_move": moved,
                              "market_prob": market_prob,
                              "decision": decision.decide(prob, sides[name][1], other_price, bets, money, moved,
-                                                         market_prob),
-                             "label": f"{away} @ {home}: {name}" + (f" {side_line:+g}" if market == "spread" else
+                                                         market_prob, steam_move),
+                             "steam": steam_move, "label": f"{away} @ {home}: {name}" + (f" {side_line:+g}" if market == "spread" else
                                                                      f" {side_line:g}" if market == "total" else " ML")})
             chosen = both[0] if p_a >= 0.5 else both[1]  # the side the model favors is the pick
             out.append(dict(chosen, kind="game", game_id=game[0], event_id=event_id, market=market, book=book,
@@ -241,7 +251,9 @@ def game_picks(conn, now=None, prices=None):
 def build(conn, now=None):
     now = now or _now()
     prices = kalshi.Prices(conn, now)  # loaded once for props and games
-    return prop_picks(conn, now, prices) + game_picks(conn, now, prices)
+    flags = model.injury_flags(conn)
+    absences = model.team_absences(conn, flags, _upcoming_team_weeks(conn, now))   # once, for props and games
+    return prop_picks(conn, now, prices, flags, absences) + game_picks(conn, now, prices, absences)
 
 
 def log(conn, picks, made_at=None):
@@ -260,7 +272,7 @@ def print_board(picks):
             d = p["decision"]
             kalshi_note = f", Kalshi {p['market_prob']:.1%}" if p.get("market_prob") is not None else ""
             print(f"  {p['label']} ({p['price']:+d} {p['book']}): ours {p['model_prob']:.1%} vs book {d['fair']:.1%}{kalshi_note},"
-                  f" EV {d['ev']:+.1%} | {'; '.join(d['reasons'])}")
+                  f" avg return {d['ev']:+.1%} | {'; '.join(d['reasons'])}")
 
 
 if __name__ == "__main__":

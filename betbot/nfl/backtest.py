@@ -16,7 +16,7 @@ import pandas as pd
 
 from betbot import db
 from betbot.names import normalize
-from betbot.nfl import game_model, model
+from betbot.nfl import game_factors, game_model, model
 from betbot.nfl.signals.regression import MARKETS
 from betbot.odds import decimal_odds, no_vig
 
@@ -56,7 +56,7 @@ def metrics(p, won, price=None, other_price=None):
 # ---------- games ----------
 
 def games(conn, first_season=1999):
-    g = game_model.predict(game_model.games(conn))
+    g = game_factors.adjusted(conn)   # factors fit only on earlier seasons
     g = g[g["home_score"].notna() & (g["season"] >= first_season)].copy()
     margin, total = g["home_score"] - g["away_score"], g["home_score"] + g["away_score"]
     home_spread = -g["spread_line"]  # nflverse: + = home favored
@@ -160,6 +160,9 @@ def real_rows(conn, cache=None):
     return pd.DataFrame(rows)
 
 
+MIN_MARKET_ROWS = 60   # a market with fewer real-line props uses the all-market calibration
+
+
 def props_real(conn, cache=None):
     """Hit rate, calibration and the stored real-line recalibration for the model on real lines."""
     d = real_rows(conn, cache)
@@ -175,8 +178,18 @@ def props_real(conn, cache=None):
             calib = model.fit_recalibration(d.loc[earlier, "p_over"], d.loc[earlier, "over"])
             adjusted[(d["week_key"] == wk).to_numpy()] = model.recalibrate(d.loc[d["week_key"] == wk, "p_over"], calib)
     real_calib = model.fit_recalibration(d["p_over"], d["over"])
-    model.save_params(conn, {"stat": REAL_LINE_CALIBRATION, "calib": real_calib, "rows": int(len(d))},
-                      int(d["week_key"].max()))
+    # each market gets its own trust in the model: pass yards carry no information beyond the book's line, receptions do
+    by_market = {m: model.fit_recalibration(g["p_over"], g["over"]) for m, g in d.groupby("market")
+                 if len(g) >= MIN_MARKET_ROWS}
+    # the public's lean on top of the recalibrated probability (only props that have splits)
+    s = d[d["over_tickets"].notna()]
+    discount = [0.0, 0.0]
+    if len(s) >= MIN_MARKET_ROWS:
+        p_cal = np.array([model.recalibrate(p, by_market.get(m, real_calib)) for p, m in zip(s["p_over"], s["market"])])
+        discount = list(model.fit_public_discount(p_cal, (s["over_tickets"] - 50) / 50,
+                                                  ((s["over_handle"] - s["over_tickets"]) / 50).fillna(0), s["over"]))
+    model.save_params(conn, {"stat": REAL_LINE_CALIBRATION, "calib": real_calib, "by_market": by_market,
+                             "public_discount": discount, "rows": int(len(d))}, int(d["week_key"].max()))
     out = {"all": metrics(d["p_over"], d["over"]),
            "all_real_line_calibrated": metrics(adjusted[(d["week_key"] > d["week_key"].min()).to_numpy()],
                                                d.loc[d["week_key"] > d["week_key"].min(), "over"]),

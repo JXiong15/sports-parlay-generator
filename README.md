@@ -33,8 +33,11 @@ parlays. Pieces can also be run on their own (see Commands).
 
 ## The conviction score (what a run prints by default)
 
-A run prints only props that reach a **conviction score of 95+** and clear a hit-rate test, plus parlays built from them.
-If none qualify it says `No picks at score 95+ today (N props checked)`. The bar is never lowered.
+A run now prints the **best parlay** (`PARLAY_LEGS` legs, default 3, for a `PARLAY_STAKE` bet, default $100) with its
+payout, chance of hitting and average return, even when that return is negative. The 95+ picks below are still scored
+and logged for grading; run `.venv/bin/python -m betbot.nfl.conviction` to see them. The 95 bar itself is never lowered.
+Game lines also weigh matchups, injuries (QB, defensive starters), rest, weather, prime-time hype, % of bets and money,
+and line movement (`betbot/nfl/game_factors.py`, `steam.py`); every factor is fit on past games and tested on later ones.
 
 The score is **not a probability.** It measures how many independent signals agree on Over or Under, and how strongly.
 Each signal is rated from -1 to +1 toward the Over:
@@ -196,7 +199,8 @@ Optional settings in `.env`:
 | `ODDS_REFRESH_HOURS` | `2` | Paid Odds API requests made within this many hours are skipped, so re-running costs nothing |
 | `NO_PAID_REQUESTS` | off | `1` = never spend Odds API credits this run (free data only) |
 | `FORCE_ODDS_PULL` | off | `1` = pull even if pulled recently or already this week (still blocked by `NO_PAID_REQUESTS`) |
-| `PARLAY_ONLY` | `1` | Short output (default): the conviction picks, their parlays and any errors. `0` also prints the full board and the EV-ranked parlays |
+| `PARLAY_ONLY` | `1` | Short output (default): the best parlay and any errors. `0` also prints the full board and the average-return-ranked parlays |
+| `PARLAY_LEGS` / `PARLAY_STAKE` | `3` / `100` | Legs and bet amount for the best parlay a run prints |
 
 ## Commands
 
