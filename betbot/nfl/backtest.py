@@ -156,7 +156,7 @@ def real_rows(conn, cache=None):
                              "p_over": float(model.prob_over(params, t["mu"], t["sigma"], r.line)),
                              "over": int(t["y"] > r.line), "over_tickets": r.over_ticket_pct,
                              "over_handle": r.over_handle_pct, "mu": float(t["mu"]), "sigma": float(t["sigma"]),
-                             "base": float(t["base"])})
+                             "base": float(t["base"]), "y": float(t["y"])})
     return pd.DataFrame(rows)
 
 

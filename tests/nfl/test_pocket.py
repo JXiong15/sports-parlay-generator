@@ -35,3 +35,8 @@ def test_select_and_log_picks_the_favored_side_once():
     assert len(chosen) == 1 and chosen[0]["side"] == "Under" and chosen[0]["price"] == -105
     assert pocket.log(conn, chosen) == 1 and pocket.log(conn, chosen) == 0
     assert pocket.record(conn) == (0, 0)                       # nothing graded yet
+
+
+def test_learn_with_no_rows_gives_no_rule_instead_of_crashing():
+    assert pocket.learn(pd.DataFrame()) == ((0.0, 1.0), {})
+    assert pocket.cell("player_rush_yds", 0.51) == "player_rush_yds|over|0"

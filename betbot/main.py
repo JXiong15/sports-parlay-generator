@@ -189,8 +189,8 @@ def collect():
             traceback.print_exc()
         try:
             pocket.run(conn, picks)
-            graded, wins = pocket.record(conn)
-            print(f"pocket rule so far: {wins}/{graded} graded picks won")
+            n_graded, wins = pocket.record(conn)
+            print(f"pocket rule so far: {wins}/{n_graded} graded picks won")
         except Exception as e:
             print(f"pocket failed: {e.__class__.__name__}: {e}")
             traceback.print_exc()

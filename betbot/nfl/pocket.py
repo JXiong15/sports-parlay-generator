@@ -19,12 +19,14 @@ EDGES = [-1, 0.01, 0.02, 0.04, 1]     # confidence buckets: how far the recalibr
 
 def cell(market, p):
     """The kind of pick for a recalibrated P(Over): market | side | confidence bucket."""
-    bucket = int(np.searchsorted(EDGES, abs(p - 0.5), side="left") - 1)
+    bucket = int(np.searchsorted(EDGES, round(abs(p - 0.5), 9), side="left") - 1)
     return f"{market}|{'over' if p > 0.5 else 'under'}|{max(bucket, 0)}"
 
 
 def learn(rows):
     """(calibration, good cells) from played real-line props. Pure: `rows` is backtest.real_rows' DataFrame."""
+    if rows.empty:
+        return (0.0, 1.0), {}
     calib = model.fit_recalibration(rows["p_over"], rows["over"])
     p = model.recalibrate(rows["p_over"].values, calib)
     hit = np.where(p > 0.5, rows["over"], 1 - rows["over"])
