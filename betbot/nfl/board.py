@@ -1,6 +1,7 @@
 """This week's NFL board: every prop and game pick with our probability, the book's prices, the betting splits
 and line movement we collect, and a BET / FADE / STAY AWAY verdict from betbot/decision.py."""
 import os
+import sqlite3
 from datetime import datetime, timezone
 from statistics import multimode
 
@@ -176,6 +177,10 @@ def game_picks(conn, now=None, prices=None, absences=None):
         absences = model.team_absences(conn, model.injury_flags(conn), _upcoming_team_weeks(conn, now))
     g = game_factors.adjusted(conn, absences)   # ratings + matchups, injuries, weather, rest, hype, QB out
     calib = _game_calibrations(g)
+    try:
+        game_factors.record(conn, g, now)   # a diagnostics row must never stop the picks
+    except sqlite3.Error as e:
+        print(f"learning log skipped: {e}")
     prices = prices or kalshi.Prices(conn, now)
     by_game = g.set_index("game_id")
     events = conn.execute("SELECT id, home_team, away_team, commence_time FROM events WHERE commence_time > ?",

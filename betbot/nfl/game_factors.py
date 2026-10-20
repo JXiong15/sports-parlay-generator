@@ -340,6 +340,27 @@ def adjusted(conn, absences=None):
     return g
 
 
+def record(conn, g, made_at):
+    """Log held-out errors (rmse, points) of the model, the blend and the market over the season being played, and the
+    trust applied to upcoming games, one row per day (the latest run of the day wins), so `SELECT * FROM learning_log`
+    shows whether the model is closing the gap. The caller commits."""
+    played = g[g["actual_margin"].notna() & g["trust_margin"].notna() & g["trust_total"].notna()]
+    if played.empty:
+        return
+    season = int(played["season"].max())
+    d = played[played["season"] == season]
+    rmse = lambda actual, col: float(np.sqrt(((d[actual] - d[col]) ** 2).mean()))
+    up = g[g["actual_margin"].isna()]
+    trust_m, trust_t = up["trust_margin"].dropna(), up["trust_total"].dropna()
+    conn.execute("INSERT OR REPLACE INTO learning_log (day, made_at, season, graded, model_margin_err, blend_margin_err,"
+                 " market_margin_err, model_total_err, blend_total_err, market_total_err, trust_margin, trust_total)"
+                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (made_at[:10], made_at, season, len(d),
+                  rmse("actual_margin", "pred_margin"), rmse("actual_margin", "blend_margin"), rmse("actual_margin", "market_margin"),
+                  rmse("actual_total", "pred_total"), rmse("actual_total", "blend_total"), rmse("actual_total", "market_total"),
+                  float(trust_m.iloc[0]) if len(trust_m) else None, float(trust_t.iloc[0]) if len(trust_t) else None))
+
+
 def table(conn, absences=None):
     """Played and upcoming games with the base model's predictions and every factor."""
     g = game_model.predict(game_model.games(conn))

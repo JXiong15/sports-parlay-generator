@@ -81,3 +81,19 @@ def test_trust_learns_how_far_to_follow_the_model():
     assert trust(market + 0.5 * (pred - market), pred, market) == pytest.approx(0.5, abs=0.01)   # model half right
     assert trust(market + rng.normal(0, 3, 2000), pred, market) < 0.1                            # model is noise
     assert trust(market[:10], pred[:10], market[:10]) == 0.5                                     # too little history
+
+
+def test_record_logs_errors_and_trust(tmp_path):
+    from betbot import db
+    from betbot.nfl.game_factors import record
+    conn = db.connect(str(tmp_path / "t.db"))
+    g = pd.DataFrame({"season": [2017, 2017, 2018], "actual_margin": [3.0, -7.0, np.nan], "actual_total": [40.0, 50.0, np.nan],
+                      "pred_margin": [0.0, 0.0, 1.0], "blend_margin": [1.0, -1.0, 1.0], "market_margin": [2.0, -6.0, 1.0],
+                      "pred_total": [45.0] * 3, "blend_total": [44.0] * 3, "market_total": [43.0] * 3,
+                      "trust_margin": [0.0, 0.0, 0.1], "trust_total": [0.2, 0.2, 0.3]})
+    record(conn, g, "2026-10-20T00:00:00Z")
+    record(conn, g, "2026-10-20T05:00:00Z")   # same day: replaces, not duplicates
+    assert conn.execute("SELECT count(*) FROM learning_log").fetchone()[0] == 1
+    row = conn.execute("SELECT season, graded, model_margin_err, market_margin_err, trust_margin, trust_total FROM learning_log").fetchone()
+    assert row[0] == 2017 and row[1] == 2 and row[2] == pytest.approx(np.sqrt((9 + 49) / 2)) and row[3] == pytest.approx(1.0)
+    assert row[4] == 0.1 and row[5] == 0.3

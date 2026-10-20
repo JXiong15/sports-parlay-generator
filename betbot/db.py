@@ -188,6 +188,15 @@ CREATE TABLE IF NOT EXISTS parlays (  -- every parlay shown: its legs as made; g
     price INTEGER NOT NULL,
     UNIQUE (legs)
 );
+CREATE TABLE IF NOT EXISTS learning_log (  -- one row per day: how the game model is doing against the market this season
+    day TEXT PRIMARY KEY,
+    made_at TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    graded INTEGER NOT NULL,      -- this season's finished games with a market line (fit on earlier seasons only)
+    model_margin_err REAL, blend_margin_err REAL, market_margin_err REAL,
+    model_total_err REAL, blend_total_err REAL, market_total_err REAL,
+    trust_margin REAL, trust_total REAL   -- weight on the model for upcoming games
+);
 CREATE TABLE IF NOT EXISTS predictions (  -- every pick as made, then graded after the game
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,           -- prop / game
