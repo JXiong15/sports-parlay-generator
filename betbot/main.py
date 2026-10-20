@@ -69,15 +69,65 @@ def should_pull_props(mins_to_kickoff, hours_since_last, refresh_hours, no_paid,
     return hours_since_last is None or hours_since_last >= refresh_hours
 
 
+def report(conn, sport, parlay_only):
+    """Grade finished picks, then print the board, the best parlay and the trackers. Reads only the database."""
+    if sport == "americanfootball_nfl":
+        graded = grader.grade(conn)  # first: doesn't depend on the board
+        if not parlay_only:
+            print(f"graded: {graded} finished picks")
+        try:
+            picks = board.build(conn)
+            props_logged, games_logged = board.log(conn, picks)
+        except Exception as e:  # the data pulled above is saved either way
+            print(f"board failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()  # a code bug shows up here with its traceback, not just one line
+            return
+        print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
+        if not parlay_only:  # the full board and the EV-ranked parlays are for debugging
+            board.print_board(picks)
+            try:
+                results, available = parlays.build(conn, picks, max_legs=2)
+                parlays.print_parlays(results, available)
+                parlays.log(conn, results)
+            except Exception as e:
+                print(f"parlays failed: {e.__class__.__name__}: {e}")
+                traceback.print_exc()
+        try:
+            # default view: the best parlay (PARLAY_LEGS legs, PARLAY_STAKE dollars); the 95+ picks are still logged
+            legs, stake = int(os.getenv("PARLAY_LEGS", "3")), float(os.getenv("PARLAY_STAKE", "100"))
+            available, results = parlays.best_available(conn, picks, max_legs=legs, top=1, stake=stake)
+            parlays.print_best_available(available, results, stake=stake)
+            parlays.log(conn, results)
+        except Exception as e:
+            print(f"parlay view failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):  # still logged for grading, no longer the headline
+                conviction.log_picks(conn, conviction.run(conn, picks))
+        except Exception as e:
+            print(f"conviction failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+        try:
+            pocket.run(conn, picks)
+            n_graded, wins = pocket.record(conn)
+            print(f"pocket rule so far: {wins}/{n_graded} graded picks won")
+        except Exception as e:
+            print(f"pocket failed: {e.__class__.__name__}: {e}")
+            traceback.print_exc()
+
+
+
 def collect():
     load_dotenv()
-    api_key = os.environ["ODDS_API_KEY"]
     sport = os.getenv("SPORT", "americanfootball_nfl")
+    conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
+    parlay_only = _flag("PARLAY_ONLY", default=True)  # short output; PARLAY_ONLY=0 shows everything
+    if _flag("OFFLINE"):  # no keys, no network, no credits: everything comes from what's already saved
+        return report(conn, sport, parlay_only)
+    api_key = os.environ["ODDS_API_KEY"]
     market = os.getenv("MARKET", "player_pass_yds")
     if "," in market:
         raise SystemExit("MARKET takes one prop market per run (pulls are tracked per market)")
-    conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
-    parlay_only = _flag("PARLAY_ONLY", default=True)  # short output; PARLAY_ONLY=0 shows everything
     if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
         print("NFL stats are out of date, updating...")
         nflverse.load(conn)
@@ -160,50 +210,7 @@ def collect():
     print(f"credits used: {credits_used}; remaining: {remaining if remaining is not None else 'unchanged'};"
           f" props pulled for {len(to_pull)} games, {skipped} skipped")
 
-    if sport == "americanfootball_nfl":
-        graded = grader.grade(conn)  # first: doesn't depend on the board
-        if not parlay_only:
-            print(f"graded: {graded} finished picks")
-        try:
-            picks = board.build(conn)
-            props_logged, games_logged = board.log(conn, picks)
-        except Exception as e:  # the data pulled above is saved either way
-            print(f"board failed: {e.__class__.__name__}: {e}")
-            traceback.print_exc()  # a code bug shows up here with its traceback, not just one line
-            return
-        print(f"predictions: {props_logged} prop and {games_logged} game picks logged")
-        if not parlay_only:  # the full board and the EV-ranked parlays are for debugging
-            board.print_board(picks)
-            try:
-                results, available = parlays.build(conn, picks, max_legs=2)
-                parlays.print_parlays(results, available)
-                parlays.log(conn, results)
-            except Exception as e:
-                print(f"parlays failed: {e.__class__.__name__}: {e}")
-                traceback.print_exc()
-        try:
-            # default view: the best parlay (PARLAY_LEGS legs, PARLAY_STAKE dollars); the 95+ picks are still logged
-            legs, stake = int(os.getenv("PARLAY_LEGS", "3")), float(os.getenv("PARLAY_STAKE", "100"))
-            available, results = parlays.best_available(conn, picks, max_legs=legs, top=1, stake=stake)
-            parlays.print_best_available(available, results, stake=stake)
-            parlays.log(conn, results)
-        except Exception as e:
-            print(f"parlay view failed: {e.__class__.__name__}: {e}")
-            traceback.print_exc()
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):  # still logged for grading, no longer the headline
-                conviction.log_picks(conn, conviction.run(conn, picks))
-        except Exception as e:
-            print(f"conviction failed: {e.__class__.__name__}: {e}")
-            traceback.print_exc()
-        try:
-            pocket.run(conn, picks)
-            n_graded, wins = pocket.record(conn)
-            print(f"pocket rule so far: {wins}/{n_graded} graded picks won")
-        except Exception as e:
-            print(f"pocket failed: {e.__class__.__name__}: {e}")
-            traceback.print_exc()
-
+    report(conn, sport, parlay_only)
 
 if __name__ == "__main__":
     collect()

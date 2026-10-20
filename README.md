@@ -200,6 +200,7 @@ Optional settings in `.env`:
 | `NO_PAID_REQUESTS` | off | `1` = never spend Odds API credits this run (free data only) |
 | `FORCE_ODDS_PULL` | off | `1` = pull even if pulled recently or already this week (still blocked by `NO_PAID_REQUESTS`) |
 | `PARLAY_ONLY` | `1` | Short output (default): the best parlay and any errors. `0` also prints the full board and the average-return-ranked parlays |
+| `OFFLINE` | off | `OFFLINE=1` runs everything from the saved database: no keys, no network, no credits |
 | `PARLAY_LEGS` / `PARLAY_STAKE` | `3` / `100` | Legs and bet amount for the best parlay a run prints |
 
 ## Commands
