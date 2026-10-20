@@ -68,19 +68,19 @@ RANKINGS = {
 }
 
 
-def build(legs, rho, conflicts, max_legs=3, top=10, pool=12, rank="ev"):
+def build(legs, rho, conflicts, max_legs=3, top=10, pool=12, rank="ev", min_ev=0.0, min_legs=2):
     """Best parlays of 2..max_legs legs from the `pool` best legs (by EV, or by edge when rank is 'conviction'),
-    positive EV only, sorted by `rank` ('ev', or 'conviction' = combined edge then payout).
+    EV above min_ev (default: positive only), sorted by `rank` ('ev', or 'conviction' = combined edge then payout).
     conflicts(a, b) -> True for legs that can't go together."""
     # the pool is the best legs by the same measure the parlays are ranked by
     pool_key = (lambda leg: -leg.get("edge", leg["ev"])) if rank == "conviction" else (lambda leg: -leg["ev"])
     candidates = sorted(legs, key=pool_key)[:pool]
     out = []
-    for size in range(2, max_legs + 1):
+    for size in range(min_legs, max_legs + 1):
         for combo in combinations(candidates, size):
             if any(conflicts(a, b) for a, b in combinations(combo, 2)):
                 continue
             result = evaluate(list(combo), rho)
-            if result["ev"] > 0:
+            if result["ev"] > min_ev:
                 out.append(result)
     return sorted(out, key=RANKINGS[rank])[:top]

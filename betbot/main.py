@@ -183,7 +183,12 @@ def collect():
                 traceback.print_exc()
         try:
             # the default view: only props scoring 95+ with a hit rate that beats the book, and parlays from them
-            conviction.log_picks(conn, conviction.run(conn, picks))
+            chosen = conviction.run(conn, picks)
+            conviction.log_picks(conn, chosen)
+            if not chosen:  # nothing cleared the bar: still show the least-bad picks, labeled
+                available, results = parlays.best_available(conn, picks)
+                parlays.print_best_available(available, results)
+                parlays.log(conn, results)
         except Exception as e:
             print(f"conviction failed: {e.__class__.__name__}: {e}")
             traceback.print_exc()

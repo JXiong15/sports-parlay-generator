@@ -9,6 +9,7 @@ and true combined probability and EV (betbot/parlay.py). Two modes:
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 
 from betbot import db, decision, parlay
@@ -40,6 +41,11 @@ def legs(picks):
     """The board's positive-EV BET / FADE picks (the side the model favors) as parlay legs."""
     out = [_leg(p, p) for p in picks if p["decision"]["verdict"] in ("BET", "FADE")]
     return [leg for leg in out if leg["ev"] > 0]
+
+
+def best_legs(picks):
+    """The side the model favors on every pick, positive EV or not: for the 'best available' view."""
+    return [_leg(p, p) for p in picks if p["price"] is not None]
 
 
 def hunt_legs(picks, min_price=MIN_PRICE, max_price=MAX_PRICE, min_conv=MIN_CONV):
@@ -76,6 +82,47 @@ def build(conn, picks=None, max_legs=3, top=10, hunt=False, min_price=MIN_PRICE,
     results = parlay.build(available, rho, conflicts, max_legs=max_legs, top=top,
                            rank="conviction" if hunt else "ev")
     return results, available
+
+
+def best_available(conn, picks, max_legs=2, top=5, stake=100.0, profit=None):
+    """When nothing is +EV: the least-bad parlays of exactly max_legs legs (EV may be negative). With a target
+    profit, only parlays that pay at least that much on `stake`. Not recommendations."""
+    available = sorted(best_legs(picks), key=lambda leg: -leg["ev"])
+    stats = sorted({leg["stat"] for leg in available if leg["kind"] == "prop"})
+    rho = correlation.rho(correlation.cached(conn, stats))
+    results = parlay.build(available, rho, conflicts, max_legs=max_legs, top=10_000, pool=16 if profit else 12,
+                           min_ev=-1.0, min_legs=max_legs)
+    if profit:
+        results = [r for r in results if (r["decimal"] - 1) * stake >= profit]
+    return available, results[:top]
+
+
+def print_best_available(available, results, top=5, stake=100.0):
+    print("\nBEST AVAILABLE (below the bar; EV can be negative, so these are NOT recommendations)")
+    for leg in available[:top]:
+        print(f"  {leg['label']} ({leg['price']:+d}): ours {leg['prob']:.1%}, EV {leg['ev']:+.1%}")
+    if not results:
+        print("\n  No parlay meets that.")
+    for r in results:
+        print(f"\n  {len(r['legs'])} legs at {r['price']:+d}: ${stake:,.0f} wins ${(r['decimal'] - 1) * stake:,.2f},"
+              f" true chance {r['true_prob']:.1%}, EV {r['ev']:+.1%} (${r['ev'] * stake:+,.2f} expected)")
+        for leg in r["legs"]:
+            print(f"      {leg['label']} ({leg['price']:+d}, ours {leg['prob']:.1%})")
+
+
+def ask(prompt, default, kind=float):
+    """Prompt for a number; Enter keeps the default (None = no limit)."""
+    while True:
+        text = input(f"{prompt} [{'none' if default is None else default}]: ").strip()
+        if not text:
+            return default
+        try:
+            value = kind(text)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+        print("  enter a positive number")
 
 
 def log(conn, results):
@@ -151,12 +198,26 @@ def main(argv=None):
     ap.add_argument("--min-price", type=int, default=MIN_PRICE)
     ap.add_argument("--max-price", type=int, default=MAX_PRICE)
     ap.add_argument("--min-conv", type=float, default=MIN_CONV, help="minimum edge over the no-vig price after SHRINK halves the model's edge, e.g. 0.10")
-    ap.add_argument("--legs", type=int, default=2, help="most legs per parlay (fewer legs hit more often)")
+    ap.add_argument("--legs", type=int, default=None, help="most legs per parlay (fewer legs hit more often); --best builds exactly this many")
+    ap.add_argument("--stake", type=float, default=None, help="--best: your bet amount in dollars")
+    ap.add_argument("--profit", type=float, default=None, help="--best: only parlays that win at least this much on the stake")
+    ap.add_argument("--best", action="store_true", help="show the least-bad picks and parlays even if EV is negative")
     ap.add_argument("--record", action="store_true", help="show settled parlays vs predicted chance, then exit")
     args = ap.parse_args(argv)
     conn = db.connect(os.getenv("DB_PATH", "betbot.db"))
     if args.record:
         return print_record(conn)
+    if args.best:
+        if sys.stdin.isatty():  # ask for whatever wasn't given as a flag
+            args.legs = args.legs or ask("Legs", 3, int)
+            args.stake = args.stake or ask("Bet amount ($)", 100.0)
+            args.profit = args.profit or ask("Target profit ($, Enter for none)", None)
+        legs, stake = args.legs or 2, args.stake or 100.0
+        available, results = best_available(conn, board.build(conn), max_legs=legs, stake=stake, profit=args.profit)
+        print_best_available(available, results, stake=stake)
+        log(conn, results)
+        return print_record(conn)
+    args.legs = args.legs or 2
     results, available = build(conn, max_legs=args.legs, hunt=args.hunt, min_price=args.min_price,
                                max_price=args.max_price, min_conv=args.min_conv)
     print_parlays(results, available, args.hunt, args.min_price, args.max_price, args.min_conv)

@@ -76,3 +76,11 @@ def test_hunt_still_applies_market_checks():
     # sharp money on the other side: 70% of the money vs 30% of the bets -> STAY AWAY, so no leg
     legs = parlays.hunt_legs([game_pick(0.60, bets_pct=70, money_pct=30)], min_conv=0.12)
     assert legs == []
+
+
+def test_ask_keeps_default_on_enter_and_retries_bad_input(monkeypatch):
+    answers = iter(["abc", "-5", "25"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert parlays.ask("Bet", 100.0) == 25.0
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert parlays.ask("Profit", None) is None

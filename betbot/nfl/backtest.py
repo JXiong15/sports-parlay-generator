@@ -189,11 +189,11 @@ def props_real(conn, cache=None):
     return out
 
 
-def calibration(conn, stats=("passing_yards", "rushing_yards", "receiving_yards", "receptions"),
+def calibration(conn, stats=tuple(s for s, _ in MARKETS.values()),
                 seasons=range(2019, 2026), cache=None):
     """Every player-game with a real role, against a line at his pre-game baseline, refit each season."""
     cache = {} if cache is None else cache
-    positions_for = {s: MARKETS[m][1] for m, (s, _) in MARKETS.items()}
+    positions_for = {s: pos for s, pos in MARKETS.values()}
     out = {}
     for stat in stats:
         df = cached_features(conn, stat, positions_for[stat], cache)
