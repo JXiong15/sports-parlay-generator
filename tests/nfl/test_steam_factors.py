@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import pandas as pd
 
@@ -69,3 +70,14 @@ def test_books_split_evenly_is_not_steam():
                 ("a", 46.5, "2026-10-19T11:00:00Z"), ("b", 44.5, "2026-10-19T11:00:00Z")])
     now = pd.Timestamp("2026-10-19T12:00:00Z").to_pydatetime()
     assert steam.game_steam(conn, "e", "totals", "Over", now=now) is None
+
+
+def test_trust_learns_how_far_to_follow_the_model():
+    import numpy as np, pandas as pd
+    from betbot.nfl.game_factors import trust
+    rng = np.random.default_rng(0)
+    market = pd.Series(rng.normal(0, 5, 2000))
+    pred = market + rng.normal(0, 3, 2000)
+    assert trust(market + 0.5 * (pred - market), pred, market) == pytest.approx(0.5, abs=0.01)   # model half right
+    assert trust(market + rng.normal(0, 3, 2000), pred, market) < 0.1                            # model is noise
+    assert trust(market[:10], pred[:10], market[:10]) == 0.5                                     # too little history

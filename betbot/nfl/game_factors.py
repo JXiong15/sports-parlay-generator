@@ -284,9 +284,34 @@ def apply(g, feats, coefs):
     return g.drop(columns=[c for c in MARGIN + TOTAL if c in g.columns])
 
 
+def _market(conn, g):
+    """The market's margin and total for every game: the closing line for played games, ESPN's current line for
+    upcoming ones (nflverse has none yet); NaN where neither exists."""
+    cur = pd.read_sql_query("SELECT game_id, -coalesce(close_home_spread, current_home_spread) AS cur_margin,"
+                            " coalesce(close_total, current_total) AS cur_total FROM nfl_game_lines", conn
+                            ).drop_duplicates("game_id")
+    g = g.merge(cur, on="game_id", how="left")
+    played = g["home_score"].notna()   # played games: the closing line; upcoming: ESPN's current line (nflverse's may be stale)
+    g["market_margin"] = g["spread_line"].where(played, g["cur_margin"]).fillna(g["cur_margin"]).fillna(g["spread_line"])
+    g["market_total"] = g["total_line"].where(played, g["cur_total"]).fillna(g["cur_total"]).fillna(g["total_line"])
+    return g.drop(columns=["cur_margin", "cur_total"])
+
+
+def trust(actual, pred, market, default=0.5):
+    """How far to move from the market toward the model: the least-squares weight of (model - market) in predicting
+    (actual - market), kept in [0, 1]. The model has not beaten the closing line, so this learns to stay near it."""
+    d = pd.DataFrame({"y": actual - market, "x": pred - market}).dropna()
+    if len(d) < 300 or (d["x"] ** 2).sum() == 0:
+        return default
+    return float(np.clip((d["x"] * d["y"]).sum() / (d["x"] ** 2).sum(), 0.0, 1.0))
+
+
 def adjusted(conn, absences=None):
     """Every game with factor-adjusted predictions: seasons before 2017 as the ratings model gave them, each later
-    season with factors fit only on earlier seasons, upcoming games with factors fit on every played game."""
+    season with factors fit only on earlier seasons, upcoming games with factors fit on every played game. Each
+    game also gets `blend_margin` / `blend_total`: the model pulled toward the market by a weight learned from earlier
+    games' results, so every graded game changes the next run's picks. `pred_*` stays the model alone, so backtests and
+    CLV tests never grade a prediction that contains the line they are graded against."""
     g = table(conn, absences)
     played = g[g["actual_margin"].notna()]
     parts = []
@@ -298,7 +323,21 @@ def adjusted(conn, absences=None):
                 continue
             c = fit(played, until_season=None if flag else season)
             parts.append(apply(rows.drop(columns=MARGIN + TOTAL), rows[["game_id"] + MARGIN + TOTAL].set_index("game_id"), c))
-    return pd.concat(parts).sort_values(["gameday", "game_id"]).reset_index(drop=True)
+    g = _market(conn, pd.concat(parts).sort_values(["gameday", "game_id"]).reset_index(drop=True))
+    done = g["actual_margin"].notna()
+    for key, actual in (("margin", "actual_margin"), ("total", "actual_total")):
+        g[f"blend_{key}"] = g[f"pred_{key}"]     # no market line yet: the model alone
+        for season in sorted(g["season"][g["season"] >= 2017].unique()):
+            here = g["season"] == season
+            # played games use only earlier seasons; upcoming games use everything played so far
+            for rows, before in ((here & done, done & (g["season"] < season)), (here & ~done, done)):
+                w = trust(g.loc[before, actual], g.loc[before, f"pred_{key}"], g.loc[before, f"market_{key}"])
+                ok = rows & g[f"market_{key}"].notna()
+                g.loc[ok, f"blend_{key}"] = g.loc[ok, f"market_{key}"] + w * (g.loc[ok, f"pred_{key}"] - g.loc[ok, f"market_{key}"])
+                g.loc[ok, f"trust_{key}"] = w
+        scored = done & g["trust_" + key].notna()
+        g[f"blend_sigma_{key}"] = float(np.sqrt(((g.loc[scored, actual] - g.loc[scored, f"blend_{key}"]) ** 2).mean()))
+    return g
 
 
 def table(conn, absences=None):

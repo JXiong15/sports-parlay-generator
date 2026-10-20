@@ -111,15 +111,15 @@ def prop_picks(conn, now=None, prices=None, flags=None, absences=None):
 
 def _game_calibrations(g):
     """Recalibration for spread / total / moneyline probabilities, from every finished game's raw probabilities."""
-    done = g[g["home_score"].notna() & g["spread_line"].notna() & g["total_line"].notna()]
+    done = g[g["home_score"].notna() & g["spread_line"].notna() & g["total_line"].notna() & g["trust_margin"].notna()]
     margin, total = done["home_score"] - done["away_score"], done["home_score"] + done["away_score"]
     s = done[margin - done["spread_line"] != 0]
     spread = model.fit_recalibration([game_model.p_home_covers(m, -l, sd) for m, l, sd in
-                                      zip(s["pred_margin"], s["spread_line"], s["sigma_margin"])],
+                                      zip(s["blend_margin"], s["spread_line"], s["blend_sigma_margin"])],
                                      (margin - done["spread_line"] > 0)[s.index].astype(int))
     t = done[total != done["total_line"]]
     tot = model.fit_recalibration([game_model.p_over(m, l, sd) for m, l, sd in
-                                   zip(t["pred_total"], t["total_line"], t["sigma_total"])],
+                                   zip(t["blend_total"], t["total_line"], t["blend_sigma_total"])],
                                   (total > done["total_line"])[t.index].astype(int))
     return {"spread": spread, "total": tot}
 
@@ -205,7 +205,7 @@ def game_picks(conn, now=None, prices=None, absences=None):
                 if "Over" not in sides or "Under" not in sides:
                     continue
                 line = sides["Over"][0]
-                p_a = model.recalibrate(game_model.p_over(r["pred_total"], line, r["sigma_total"]), calib["total"])
+                p_a = model.recalibrate(game_model.p_over(r["blend_total"], line, r["blend_sigma_total"]), calib["total"])
                 a_name, b_name, a_side, b_side = "Over", "Under", "over", "under"
             else:
                 if home not in sides or away not in sides:
@@ -214,13 +214,13 @@ def game_picks(conn, now=None, prices=None, absences=None):
                 home_spread = spread[1][home][0] if spread and home in spread[1] else None
                 if market == "spread":
                     line = sides[home][0]
-                    p_a = model.recalibrate(game_model.p_home_covers(r["pred_margin"], line, r["sigma_margin"]),
+                    p_a = model.recalibrate(game_model.p_home_covers(r["blend_margin"], line, r["blend_sigma_margin"]),
                                             calib["spread"])
                 elif home_spread is not None:
                     # moneyline from the spread view, so the two can't contradict each other
-                    p_cover = model.recalibrate(game_model.p_home_covers(r["pred_margin"], home_spread, r["sigma_margin"]),
+                    p_cover = model.recalibrate(game_model.p_home_covers(r["blend_margin"], home_spread, r["blend_sigma_margin"]),
                                                 calib["spread"])
-                    p_a = game_model.p_home_wins_from_spread(p_cover, home_spread, r["sigma_margin"])
+                    p_a = game_model.p_home_wins_from_spread(p_cover, home_spread, r["blend_sigma_margin"])
                 else:
                     continue
                 a_name, b_name, a_side, b_side = home, away, "home", "away"
@@ -248,7 +248,7 @@ def game_picks(conn, now=None, prices=None, absences=None):
                                                                      f" {side_line:g}" if market == "total" else " ML")})
             chosen = both[0] if p_a >= 0.5 else both[1]  # the side the model favors is the pick
             out.append(dict(chosen, kind="game", game_id=game[0], event_id=event_id, market=market, book=book,
-                            mu=float(r["pred_margin"] if market != "total" else r["pred_total"]), sides=both))
+                            mu=float(r["blend_margin"] if market != "total" else r["blend_total"]), sides=both))
     return out
 
 
