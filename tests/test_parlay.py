@@ -45,3 +45,10 @@ def test_conviction_ranking_prefers_edge_then_payout():
     assert all(r["conviction"] == r["true_prob"] - 1 / r["decimal"] for r in by_conv)
     assert [r["conviction"] for r in by_conv] == sorted((r["conviction"] for r in by_conv), reverse=True)
     assert {tuple(l["label"] for l in r["legs"]) for r in by_ev} == {tuple(l["label"] for l in r["legs"]) for r in by_conv}
+
+
+def test_min_ev_lets_negative_ev_parlays_through_for_the_best_available_view():
+    legs = [leg("A", 0.5, game="g1"), leg("B", 0.5, game="g2")]
+    assert parlay.build(legs, lambda a, b: 0, lambda a, b: False) == []
+    shown = parlay.build(legs, lambda a, b: 0, lambda a, b: False, min_ev=-1.0)
+    assert len(shown) == 1 and shown[0]["ev"] < 0

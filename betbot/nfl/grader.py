@@ -146,7 +146,7 @@ def grade(conn, now=None):
         if g is None or g[1] is None:
             continue  # not played yet
         g = dict(zip(game_cols, g))
-        graded = grade_prop(conn, p, now) if p["kind"] in ("prop", "conviction") else grade_game(conn, p, g)
+        graded = grade_prop(conn, p, now) if p["kind"] in ("prop", "conviction", "pocket") else grade_game(conn, p, g)
         if graded is None:
             continue  # stats not posted yet
         if graded["result"] == "unverified" and p["result"] == "unverified":

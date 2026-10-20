@@ -307,3 +307,9 @@ splits, because those sources don't keep old data. Back the file up somewhere sa
   bad data.
 - The regression rule compares the last game to today's line until a week of line history has been saved.
 - The injury report only shows each player's last practice status for the week.
+
+## Future Ideas
+- Create a FE to click a button and generate parlay for me given selections of mine, like number of legs, min odds, which game(s), etc. Then save this to compare with actual results at the end.
+  - Would need APIs too for this
+- Actual results update one game is completed.
+- Tracking tab/page shows historic picks and results with a chart to see how many picks are correct v incorrect.

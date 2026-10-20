@@ -156,7 +156,7 @@ def real_rows(conn, cache=None):
                              "p_over": float(model.prob_over(params, t["mu"], t["sigma"], r.line)),
                              "over": int(t["y"] > r.line), "over_tickets": r.over_ticket_pct,
                              "over_handle": r.over_handle_pct, "mu": float(t["mu"]), "sigma": float(t["sigma"]),
-                             "base": float(t["base"])})
+                             "base": float(t["base"]), "y": float(t["y"])})
     return pd.DataFrame(rows)
 
 
@@ -189,11 +189,11 @@ def props_real(conn, cache=None):
     return out
 
 
-def calibration(conn, stats=("passing_yards", "rushing_yards", "receiving_yards", "receptions"),
+def calibration(conn, stats=tuple(s for s, _ in MARKETS.values()),
                 seasons=range(2019, 2026), cache=None):
     """Every player-game with a real role, against a line at his pre-game baseline, refit each season."""
     cache = {} if cache is None else cache
-    positions_for = {s: MARKETS[m][1] for m, (s, _) in MARKETS.items()}
+    positions_for = {s: pos for s, pos in MARKETS.values()}
     out = {}
     for stat in stats:
         df = cached_features(conn, stat, positions_for[stat], cache)
