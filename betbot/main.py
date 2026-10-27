@@ -43,15 +43,17 @@ def problems(output):
     return [line.strip() for line in output.splitlines() if PROBLEM_WORDS.search(line)]
 
 
-def should_pull_game_odds(hours_since_last, pulled_this_week, in_sunday_window, refresh_hours, no_paid, force):
+def should_pull_game_odds(hours_since_last, pulled_this_week, in_sunday_window, refresh_hours, no_paid, force,
+                          game_soon=False):
     """Whether to spend 3 credits on game odds. Same priority as props: NO_PAID_REQUESTS always wins; FORCE_ODDS_PULL
     overrides everything except a repeat within 15 minutes; otherwise not within refresh_hours, and either not
-    pulled yet this week or it's Sunday 11am-noon Central."""
+    pulled yet this week, a game starts within 24 hours (so game-day lines are never a week old), or it's Sunday
+    11am-noon Central."""
     if no_paid:
         return False
     if hours_since_last is not None and hours_since_last < (MIN_REPEAT_HOURS if force else refresh_hours):
         return False
-    return force or not pulled_this_week or in_sunday_window
+    return force or not pulled_this_week or game_soon or in_sunday_window
 
 
 def should_pull_props(mins_to_kickoff, hours_since_last, refresh_hours, no_paid, force):
@@ -124,7 +126,7 @@ def collect():
     parlay_only = _flag("PARLAY_ONLY", default=True)  # short output; PARLAY_ONLY=0 shows everything
     if _flag("OFFLINE"):  # no keys, no network, no credits: everything comes from what's already saved
         return report(conn, sport, parlay_only)
-    api_key = os.environ["ODDS_API_KEY"]
+    api_key = os.getenv("ODDS_API_KEY", "")  # commented out of .env = never contact the paid API
     market = os.getenv("MARKET", "player_pass_yds")
     if "," in market:
         raise SystemExit("MARKET takes one prop market per run (pulls are tracked per market)")
@@ -159,7 +161,7 @@ def collect():
     # paid requests made within this many hours are skipped, so re-running soon after costs nothing
     refresh_hours = float(os.getenv("ODDS_REFRESH_HOURS", "2"))
     force_pull = _flag("FORCE_ODDS_PULL")  # pull now even if pulled recently or already this week
-    no_paid = _flag("NO_PAID_REQUESTS")    # never spend credits this run (wins over FORCE_ODDS_PULL)
+    no_paid = _flag("NO_PAID_REQUESTS") or not api_key  # never spend credits (wins over FORCE_ODDS_PULL)
     credits_used = 0
 
     # game odds: once a week, plus a window at 11am-noon Central on Sundays
@@ -169,8 +171,10 @@ def collect():
     game_kind = odds_api.game_odds_kind(sport)  # per sport, so an MLB run doesn't count as an NFL pull
     last = db.hours_since_pull(conn, game_kind, "", now)
     games = []
+    events = odds_api.get_events(api_key, sport) if api_key else []  # free; also used for the props below
+    game_soon = any(now < datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) < horizon for e in events)
     if should_pull_game_odds(last, last is not None and (now - timedelta(hours=last)).astimezone(ct) >= week_start,
-                             now_ct.weekday() == 6 and 11 <= now_ct.hour < 12, refresh_hours, no_paid, force_pull):
+                             now_ct.weekday() == 6 and 11 <= now_ct.hour < 12, refresh_hours, no_paid, force_pull, game_soon):
         games, remaining = odds_api.get_game_odds(api_key, sport)
         with conn:
             for event in games:
@@ -184,11 +188,11 @@ def collect():
     elif no_paid:
         print("NO_PAID_REQUESTS set: no paid Odds API requests this run")
     else:
-        print("game odds: pulled recently or already this week, skipped (0 credits; FORCE_ODDS_PULL=1 to pull)")
+        print("game odds: pulled recently, skipped (0 credits; FORCE_ODDS_PULL=1 to pull)")
 
     # props: games starting in the next 24 hours, 1 credit each
     to_pull, skipped = [], 0
-    for event in odds_api.get_events(api_key, sport):
+    for event in events:
         start = datetime.fromisoformat(event["commence_time"].replace("Z", "+00:00"))
         if not now < start < horizon:
             continue

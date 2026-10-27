@@ -57,3 +57,11 @@ def test_status_codes_match_as_whole_words_only():
     assert problems("espn: 14290 rows\nweather: 0.0429\nweather: HTTP 429 too many requests") == [
         "weather: HTTP 429 too many requests"]
     assert problems("kalshi: could not parse a market") == ["kalshi: could not parse a market"]
+
+
+def test_game_day_refreshes_game_odds_but_not_within_refresh_window():
+    from betbot.main import should_pull_game_odds as game
+    assert game(30, True, False, 2, no_paid=False, force=False, game_soon=True)      # stale week-old line, game today
+    assert not game(1, True, False, 2, no_paid=False, force=False, game_soon=True)   # pulled an hour ago
+    assert not game(30, True, False, 2, no_paid=True, force=False, game_soon=True)
+    assert not game(30, True, False, 2, no_paid=False, force=False, game_soon=False)

@@ -227,3 +227,6 @@ __marimo__/
 
 # graphify knowledge graph output
 graphify-out/
+
+# Weekly pick log (personal, never committed)
+picks/
