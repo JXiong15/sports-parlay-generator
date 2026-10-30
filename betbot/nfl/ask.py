@@ -48,9 +48,12 @@ def ask(conn, player, market=None):
     mine = [n for n, k in names.items() if k == key] or [n for n, k in names.items() if key in k]
     if not mine:
         return f"No prop lines saved for '{player}'. Run betbot.main to pull them."
+    if len({names[n] for n in mine}) > 1:
+        return f"'{player}' matches several players: {', '.join(sorted(mine))}. Type the full name."
     name = mine[0]
-    lines = pd.read_sql_query("SELECT market, side, line, price, book, fetched_at FROM lines WHERE player = ?",
-                              conn, params=[name])
+    key = normalize(name)
+    lines = pd.read_sql_query("SELECT market, side, line, price, book, fetched_at, coalesce(seen_at, fetched_at) AS seen"
+                              f" FROM lines WHERE player IN ({','.join('?' * len(mine))})", conn, params=mine)
     weeks = pd.read_sql_query("SELECT * FROM nfl_player_weeks WHERE player_display_name = ? AND season >= 2025"
                               " ORDER BY season, week", conn, params=[name])
     team = weeks.team.iloc[-1] if len(weeks) else None
@@ -68,14 +71,17 @@ def ask(conn, player, market=None):
         res.append(f"games played in {weeks.season.max()}: {n}" + (" (the 'last 8' numbers below reach back into last season)" if n < 8 else ""))
     bad_air = None
     if ctx:
-        res.append(f"game: {ctx[0]} @ {ctx[1]}, home spread {ctx[2]:+g}, total {ctx[3]:g}, implied {ctx[0]} {ctx[5]:g} / {ctx[1]} {ctx[4]:g}")
+        num = lambda v, fmt="g": "n/a" if v is None else format(v, fmt)
+        res.append(f"game: {ctx[0]} @ {ctx[1]}, home spread {num(ctx[2], '+g')}, total {num(ctx[3])}, implied {ctx[0]} {num(ctx[5])} / {ctx[1]} {num(ctx[4])}")
         w = conn.execute("SELECT indoor, temp_f, wind_mph, gust_mph, precip_pct FROM nfl_weather WHERE game_id = ?",
                          (ctx[6],)).fetchone()
         if w and not w[0]:
-            res.append(f"weather: {w[1]:.0f}F, wind {w[2]:.0f} mph (gusts {w[3]:.0f}), rain chance {w[4]:.0f}%")
-            if w[2] >= 15 or w[3] >= 25 or w[4] >= 50 or w[1] <= 32:
+            res.append(f"weather: {num(w[1], '.0f')}F, wind {num(w[2], '.0f')} mph (gusts {num(w[3], '.0f')}), "
+                       f"rain chance {num(w[4], '.0f')}%")
+            t, wind, gust, rain = (x if x is not None else 0 for x in (w[1], w[2], w[3], w[4]))
+            if wind >= 15 or gust >= 25 or rain >= 50 or (w[1] is not None and t <= 32):
                 bad_air = "bad weather (wind/rain/cold): passing and receiving yards tend to go Under"
-        elif w:
+        elif w and w[0]:
             res.append("weather: indoors")
         g = weeks[weeks.game_id.notna()].assign(home=lambda z: z.game_id.str.split("_").str[-1] == z.team)
         res.append(f"tonight: {'HOME' if ctx[1] == team else 'AWAY'}; " + ", ".join(
@@ -98,7 +104,10 @@ def ask(conn, player, market=None):
         if market and market not in (m, short):
             continue
         d = lines[lines.market == m]
-        latest = d[d.fetched_at == d.fetched_at.max()]
+        # the table keeps only changed prices: the current price is each book's newest row per side and line, and a
+        # line the book took down (not seen in its latest pull) is dropped
+        latest = d.sort_values("fetched_at").groupby(["book", "side", "line"]).tail(1)
+        latest = latest[latest.seen == latest.groupby("book").seen.transform("max")]
         # each book's main line = the one priced closest to even money (the rest are alternate lines)
         if short == "anytime_td":
             yes = latest[latest.side.isin(["Yes", "Over"])]
@@ -125,9 +134,11 @@ def ask(conn, player, market=None):
         op, up = o.price.apply(implied).mean(), u.price.apply(implied).mean()
         opens = d.sort_values("fetched_at").groupby("book").first().line
         first = float(opens.median())
-        age = (pd.Timestamp.now(tz="UTC") - pd.to_datetime(d.fetched_at, utc=True).max()).total_seconds() / 3600
-        sp = conn.execute("SELECT over_bets, over_handle FROM prop_splits WHERE market = ? AND player = ?"
-                          " AND abs(line - ?) <= 1 ORDER BY article_id DESC LIMIT 1", (m, name, line)).fetchone()
+        age = (pd.Timestamp.now(tz="UTC") - pd.to_datetime(latest.seen, utc=True).max()).total_seconds() / 3600
+        sp = conn.execute("SELECT over_bets, over_handle FROM prop_splits s JOIN dk_articles a ON a.id = s.article_id"
+                          " WHERE s.market = ? AND s.player = ? AND s.period IS NULL AND abs(s.line - ?) <= 1"
+                          " AND a.published >= date('now','-7 day') ORDER BY s.article_id DESC LIMIT 1",
+                          (m, name, line)).fetchone()
         stat = STATS.get(short)
         hit = med = mean = None
         if stat and stat in weeks:

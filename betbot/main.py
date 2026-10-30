@@ -47,7 +47,7 @@ def should_pull_game_odds(hours_since_last, pulled_this_week, in_sunday_window, 
                           game_soon=False):
     """Whether to spend 3 credits on game odds. Same priority as props: NO_PAID_REQUESTS always wins; FORCE_ODDS_PULL
     overrides everything except a repeat within 15 minutes; otherwise not within refresh_hours, and either not
-    pulled yet this week, a game starts within 24 hours (so game-day lines are never a week old), or it's Sunday
+    pulled yet this week, a game starts within the hour (so the lines you bet on are fresh), or it's Sunday
     11am-noon Central."""
     if no_paid:
         return False
@@ -164,7 +164,7 @@ def collect():
     no_paid = _flag("NO_PAID_REQUESTS") or not api_key  # never spend credits (wins over FORCE_ODDS_PULL)
     credits_used = 0
 
-    # game odds: once a week, plus a window at 11am-noon Central on Sundays
+    # game odds: once a week, plus 11am-noon Central on Sundays, plus the hour before any kickoff (props use 24h)
     ct = ZoneInfo("America/Chicago")
     now_ct = now.astimezone(ct)
     week_start = now_ct.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now_ct.weekday())
@@ -172,7 +172,8 @@ def collect():
     last = db.hours_since_pull(conn, game_kind, "", now)
     games = []
     events = odds_api.get_events(api_key, sport) if api_key else []  # free; also used for the props below
-    game_soon = any(now < datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) < horizon for e in events)
+    game_soon = any(now < datetime.fromisoformat(e["commence_time"].replace("Z", "+00:00")) < now + timedelta(hours=1)
+                    for e in events)
     if should_pull_game_odds(last, last is not None and (now - timedelta(hours=last)).astimezone(ct) >= week_start,
                              now_ct.weekday() == 6 and 11 <= now_ct.hour < 12, refresh_hours, no_paid, force_pull, game_soon):
         games, remaining = odds_api.get_game_odds(api_key, sport)
