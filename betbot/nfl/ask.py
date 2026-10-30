@@ -63,6 +63,9 @@ def ask(conn, player, market=None):
                        " FROM nfl_game_context WHERE (home_team = ? OR away_team = ?) AND gameday >= date('now','-1 day')"
                        " ORDER BY gameday LIMIT 1", (team, team)).fetchone() if team else None
     res = [f"{name} ({team}), status: {status or 'not on injury list'}"]
+    if len(weeks):
+        n = int((weeks.season == weeks.season.max()).sum())
+        res.append(f"games played in {weeks.season.max()}: {n}" + (" (the 'last 8' numbers below reach back into last season)" if n < 8 else ""))
     bad_air = None
     if ctx:
         res.append(f"game: {ctx[0]} @ {ctx[1]}, home spread {ctx[2]:+g}, total {ctx[3]:g}, implied {ctx[0]} {ctx[5]:g} / {ctx[1]} {ctx[4]:g}")

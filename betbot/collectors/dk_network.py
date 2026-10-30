@@ -65,9 +65,9 @@ def _num(s):
 
 
 def _split(cell):
-    """(over %, under %) from 'Over: 74.5% Under: 25.5%', 'Over: 100.0% Under: N/A' or 'Under (60.0%)'."""
-    over = re.search(r"Over:\s*([\d.]+)%", cell)
-    under = re.search(r"Under:\s*([\d.]+)%", cell)
+    """(over %, under %) from 'Over: 74.5% Under: 25.5%', 'Over 97% / Under 3%', 'Over: 100.0% Under: N/A' or 'Under (60.0%)'."""
+    over = re.search(r"Over:?\s*([\d.]+)%", cell)
+    under = re.search(r"Under:?\s*([\d.]+)%", cell)
     if over or under:
         return _num(over and over.group(1)), _num(under and under.group(1))
     leader = re.search(r"(Over|Under)\s*\(([\d.]+)%\)", cell)
@@ -100,7 +100,7 @@ def parse(page_html):
     for table in re.findall(r"<table.*?</table>", page_html, re.S):
         trs = re.findall(r"<tr.*?</tr>", table, re.S)
         header = [c.lower() for c in _cells(trs[0])] if trs else []
-        if "player prop" not in header:
+        if "player prop" not in header and not {"player", "market"} <= set(header):  # old and Oct 2026 layouts
             continue
         col = {name: header.index(name) for name in header}
         handle = next((i for name, i in col.items() if name.startswith("handle")), None)
@@ -109,7 +109,7 @@ def parse(page_html):
             cells = _cells(tr)
             if len(cells) != len(header):
                 continue
-            text = cells[col["player prop"]]
+            text = cells[col["player prop"]] if "player prop" in col else f"{cells[col['player']]} {cells[col['market']]}"
             if "line" in col and _num(cells[col["line"]]) is None:
                 unreadable.append(f"{text} (DraftKings gives no line)")
                 continue
