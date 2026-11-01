@@ -65,3 +65,26 @@ def test_game_odds_refresh_when_a_game_starts_within_the_hour_but_not_within_ref
     assert not game(1, True, False, 2, no_paid=False, force=False, game_soon=True)   # pulled an hour ago
     assert not game(30, True, False, 2, no_paid=True, force=False, game_soon=True)
     assert not game(30, True, False, 2, no_paid=False, force=False, game_soon=False)
+
+
+def test_saved_odds_age_hours():
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    from betbot.nfl.run_picks import MARKETS, saved_odds_age_hours
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE odds_pulls (kind TEXT, event_id TEXT, fetched_at TEXT)")
+    assert saved_odds_age_hours(conn) is None
+    ago = lambda h: (datetime.now(timezone.utc) - timedelta(hours=h)).isoformat()
+    conn.executemany("INSERT INTO odds_pulls VALUES (?, 'e', ?)", [(m, ago(1)) for m in MARKETS[:-1]])
+    assert saved_odds_age_hours(conn) is None  # one market never pulled
+    conn.execute("INSERT INTO odds_pulls VALUES (?, 'e', ?)", (MARKETS[-1], ago(3)))
+    assert 2.9 < saved_odds_age_hours(conn) < 3.1
+
+
+def test_only_the_players_own_injury_flags_count():
+    from betbot.nfl.run_picks import confidence, usable
+    pick = lambda *flags: {"player": "A B", "market": "player_rush_yds", "line": 50, "event_id": "e", "flags": list(flags),
+                           "decision": {"fair": 0.5, "prob": 0.6, "ev": 0.1}}
+    assert usable(pick("teammate: WR C D (Out)", "NYJ missing: CB E F (Out)"), {"e"})
+    assert not usable(pick("A B is Out"), {"e"})
+    assert confidence(pick("teammate: WR C D (Questionable)")) > confidence(pick("A B is Questionable"))

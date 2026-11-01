@@ -130,7 +130,7 @@ def collect():
     market = os.getenv("MARKET", "player_pass_yds")
     if "," in market:
         raise SystemExit("MARKET takes one prop market per run (pulls are tracked per market)")
-    if sport == "americanfootball_nfl" and nflverse.is_stale(conn):
+    if sport == "americanfootball_nfl" and not _flag("SKIP_FREE_SOURCES") and nflverse.is_stale(conn):
         print("NFL stats are out of date, updating...")
         nflverse.load(conn)
     if sport == "americanfootball_nfl":
@@ -141,7 +141,7 @@ def collect():
                  ("dk network", lambda: dk_network.update(conn, "nfl")),
                  ("weather", lambda: weather.update(conn)),
                  ("kalshi", lambda: print("kalshi: %d open NFL markets, %d prices changed" % kalshi.update(conn))))
-        for name, step in steps:
+        for name, step in (() if _flag("SKIP_FREE_SOURCES") else steps):  # run_picks loads them once, not per market
             # a failed free source is reported and skipped; it never blocks the paid odds pull below
             out = io.StringIO()
             try:
@@ -151,7 +151,7 @@ def collect():
                 print(f"{name} failed: {e.__class__.__name__}: {e}")
             for line in problems(out.getvalue()):  # short mode hides the chatter, not the warnings
                 print(f"{name}: {line}")
-        if not parlay_only:
+        if not parlay_only and not _flag("SKIP_FREE_SOURCES"):
             print_line_moves(conn)
 
     now = datetime.now(timezone.utc)
@@ -215,7 +215,8 @@ def collect():
     print(f"credits used: {credits_used}; remaining: {remaining if remaining is not None else 'unchanged'};"
           f" props pulled for {len(to_pull)} games, {skipped} skipped")
 
-    report(conn, sport, parlay_only)
+    if not _flag("SKIP_REPORT"):  # run_picks reports once, after the last market
+        report(conn, sport, parlay_only)
 
 if __name__ == "__main__":
     collect()

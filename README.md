@@ -5,6 +5,18 @@ data into one local database, then flags props that look mispriced. NFL first; o
 
 It is a decision aid, not a "sure thing" generator. No bet is guaranteed. Bet only what you can afford to lose.
 
+## Get today's picks (run this one command)
+
+```
+.venv/bin/python -m betbot.nfl.run_picks
+```
+
+Loads every free source once (stats, injuries, weather, Kalshi, betting splits), pulls fresh game lines and the main
+prop markets (pass yds, rush yds, receptions, receiving yds, anytime TD) if the saved odds are 2+ hours old, then prints
+the model's full board by verdict and the best parlay. A fresh pull costs about 63 Odds API credits (3 + one per game
+per market); a re-run within 2 hours uses saved data and costs 0. `NO_PAID_REQUESTS=1` keeps it free. The board is the
+model's raw view, not a recommendation list: check it against injuries, game script and the no-proven-edge backtest.
+
 ## What one run does
 
 `.venv/bin/python -m betbot.main` (NFL by default):
