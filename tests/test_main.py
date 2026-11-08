@@ -88,3 +88,15 @@ def test_only_the_players_own_injury_flags_count():
     assert usable(pick("teammate: WR C D (Out)", "NYJ missing: CB E F (Out)"), {"e"})
     assert not usable(pick("A B is Out"), {"e"})
     assert confidence(pick("teammate: WR C D (Questionable)")) > confidence(pick("A B is Questionable"))
+
+
+def test_receiving_under_dropped_when_a_wr_te_teammate_is_out():
+    from betbot.nfl.run_picks import usable
+    pick = lambda side, flag, market="player_receptions": {"player": "A B", "market": market, "side": side, "line": 5.5, "event_id": "e",
+                               "flags": [flag], "decision": {"fair": 0.5, "prob": 0.6, "ev": 0.1}}
+    assert not usable(pick("Under", "teammate: WR C D (Out)"), {"e"})
+    assert not usable(pick("Under", "teammate: TE C D (Suspension)", "player_reception_yds"), {"e"})
+    assert usable(pick("Under", "teammate: WR C D (Questionable)"), {"e"})
+    assert usable(pick("Under", "teammate: WR C D (Out)", "player_rush_yds"), {"e"})
+    assert usable(pick("Over", "teammate: WR C D (Out)"), {"e"})
+    assert usable(pick("Under", "teammate: T C D (Out)"), {"e"})

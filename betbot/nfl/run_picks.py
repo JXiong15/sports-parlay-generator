@@ -6,13 +6,15 @@ per market (about 63 for 12 games). `NO_PAID_REQUESTS=1` = free sources and save
 import contextlib
 import io
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from betbot import db, decision, main
 from betbot.nfl import board, grader, parlays
+from betbot.nfl.signals.injuries import MISSING
 
-SHRINK = 0.5        # confidence = book's fair + this share of the model's edge (the backtest shows props barely beat it)
-MAX_EDGE = 0.05     # ...and never more than 5 points above the book
+SHRINK = 0.2        # confidence = book's fair + this share of the model's edge; 567 graded props: a bigger edge hit LESS often
+MAX_EDGE = 0.03     # ...and never more than 3 points above the book
 PER_GROUP = 3       # most rows per market and side, so one model lean (e.g. Under rush yds) can't flood the table
 MIN_YARDS_LINE = 5  # a yardage line below this is a fringe player who may not play
 TABLE_ROWS = 15
@@ -36,6 +38,10 @@ def own_flags(p):
     return [f for f in p.get("flags", []) if f.startswith(p.get("player", "\0") + " is ")]
 
 
+def teammate_skill_out(p):
+    return any(re.match(r"teammate: (WR|TE) .*\((%s)\)" % "|".join(MISSING), f) for f in p.get("flags", []))
+
+
 def confidence(p):
     """My honest number: a share of the model's edge over the book, less for an injury flag, capped."""
     d = p["decision"]
@@ -50,6 +56,8 @@ def usable(p, today):
             return False
         if any(f.endswith(("Out", "Injured Reserve", "Suspension")) for f in own_flags(p)):
             return False
+        if p["market"] in ("player_receptions", "player_reception_yds") and p.get("side") == "Under" and teammate_skill_out(p):
+            return False  # his teammate's targets go somewhere: receiving Unders lost on this (Wk 8 CAR@GB, Wk 9 Coleman)
     if p.get("market_prob") is not None and p["market_prob"] < d["fair"] - 0.02:
         return False  # the prediction market is against us
     return d["ev"] > 0 and p.get("event_id") in today
@@ -88,7 +96,7 @@ def show(conn):
         if seen[group] <= PER_GROUP:
             chosen.append(p)
     print(decision.NO_EDGE_WARNING)
-    print(f"\n{len(chosen)} usable picks of {len(picks)} (kicking off in the next 24h; fringe lines, injured-out players and "
+    print(f"\n{len(chosen)} usable picks of {len(picks)} (kicking off in the next 24h; fringe lines, injured-out players, receiving Unders with a WR/TE teammate out, and "
           f"picks Kalshi disagrees with are dropped; max {PER_GROUP} per market and side). Confidence is shrunk toward the "
           "book's price. Unvetted for roles and game script: check those before betting.\n")
     print("| # | Pick | Odds | Conf | Bets / money | Evidence | Why | Risk | Verdict |\n|---|---|---|---|---|---|---|---|---|")
