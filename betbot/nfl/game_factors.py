@@ -73,13 +73,15 @@ def _splits(conn):
         arch = arch.drop_duplicates(["game_id", "market", "side"], keep="last")   # a current page beats an old capture
     else:
         arch = arch.sort_values("at").drop_duplicates(["game_id", "market", "side"])
+    if arch.empty:                                  # no splits saved yet: the pivot below would have no "bets" column
+        return pd.DataFrame(columns=["bets_home", "bets_over", "gap_home", "gap_over"], dtype=float).rename_axis("game_id")
     arch["bets"] = (arch["bets_pct"] - 50) / 50
     arch["gap"] = ((arch["money_pct"] - arch["bets_pct"]) / 50).fillna(0)
     wide = arch.pivot(index="game_id", columns="market", values=["bets", "gap"])
     out = pd.DataFrame(index=wide.index)
     for stat in ("bets", "gap"):
-        out[f"{stat}_home"] = wide[stat].get("spread")
-        out[f"{stat}_over"] = wide[stat].get("total")
+        out[f"{stat}_home"] = wide[stat].get("spread", 0.0)     # 0.0 keeps the column float when a market is missing
+        out[f"{stat}_over"] = wide[stat].get("total", 0.0)
     return out.fillna(0)
 
 
