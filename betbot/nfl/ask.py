@@ -7,6 +7,7 @@ import pandas as pd
 
 from betbot import db
 from betbot.names import normalize
+from betbot.nfl.board import _prop_splits
 from betbot.odds import implied_prob as implied
 
 STATS = {"pass_yds": "passing_yards", "pass_tds": "passing_tds", "pass_attempts": "attempts",
@@ -135,10 +136,7 @@ def ask(conn, player, market=None):
         opens = d.sort_values("fetched_at").groupby("book").first().line
         first = float(opens.median())
         age = (pd.Timestamp.now(tz="UTC") - pd.to_datetime(latest.seen, utc=True).max()).total_seconds() / 3600
-        sp = conn.execute("SELECT over_bets, over_handle FROM prop_splits s JOIN dk_articles a ON a.id = s.article_id"
-                          " WHERE s.market = ? AND s.player = ? AND s.period IS NULL AND abs(s.line - ?) <= 1"
-                          " AND a.published >= date('now','-7 day') ORDER BY s.article_id DESC LIMIT 1",
-                          (m, name, line)).fetchone()
+        sp = _prop_splits(conn, name, m, line)
         stat = STATS.get(short)
         hit = med = mean = None
         if stat and stat in weeks:
@@ -148,7 +146,7 @@ def ask(conn, player, market=None):
         if hit is not None:
             head += f"; last 8: over {hit:.0%}, median {med:g}, mean {mean:.1f}"
         res.append(head)
-        if sp:
+        if sp and None not in sp:
             res.append(f"  splits: {sp[0]:.0f}% of bets / {sp[1]:.0f}% of money on the Over")
         odd = max(mains, key=lambda b: abs(mains[b] - line))
         found = flags(op, up, spread, line - first, sp[0] if sp else None, hit, med, mean, line, status, age,

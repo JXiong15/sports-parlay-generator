@@ -30,9 +30,11 @@ def _prop_splits(conn, player, market, line):
     matched loosely ('Kenneth Walker III' = 'Kenneth Walker'), as the Odds API and DraftKings spell them differently."""
     key = normalize(player)
     for name, bets, handle in conn.execute(
-            "SELECT p.player, p.over_bets, p.over_handle FROM prop_splits p JOIN dk_articles a ON a.id = p.article_id"
-            " WHERE p.market = ? AND p.line = ? AND p.period IS NULL AND a.published >= date('now', '-7 days')"
-            " ORDER BY a.published DESC", (market, line)):
+            "SELECT p.player, coalesce(p.over_bets, 100 - p.under_bets), coalesce(p.over_handle, 100 - p.under_handle)"
+            " FROM prop_splits p JOIN dk_articles a ON a.id = p.article_id"
+            " WHERE p.market = ? AND abs(p.line - ?) <= ? AND p.period IS NULL AND a.published >= date('now', '-7 days')"
+            " ORDER BY abs(p.line - ?), a.published DESC", (market, line, 1 if line >= 10 else 0, line)):
+        # books differ by a point on yardage lines; a 1.5 vs 2.5 reception line is a different bet
         if normalize(name) == key:
             return bets, handle
     return None

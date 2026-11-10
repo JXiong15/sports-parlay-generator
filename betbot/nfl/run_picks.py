@@ -21,6 +21,7 @@ TABLE_ROWS = 15
 VERDICTS = {"BET": "Bet", "FADE": "Fade", "STAY AWAY": "Pass"}  # Pass = no clear edge on the adjusted odds
 MARKETS = ["player_pass_yds", "player_rush_yds", "player_receptions", "player_reception_yds", "player_anytime_td"]
 FRESH_HOURS = 2
+MEAN_TOLERANCE = 0.10  # an Under whose 20-game mean is 10%+ above the line (or an Over 10%+ below) leans on a median that one big game beats
 
 
 def saved_odds_age_hours(conn):
@@ -58,6 +59,12 @@ def usable(p, today):
             return False
         if p["market"] in ("player_receptions", "player_reception_yds") and p.get("side") == "Under" and teammate_skill_out(p):
             return False  # his teammate's targets go somewhere: receiving Unders lost on this (Wk 8 CAR@GB, Wk 9 Coleman)
+        if p.get("mean") is not None and p["line"]:
+            past_line = p["mean"] / p["line"] - 1   # how far the mean sits above the line
+            if (past_line if p.get("side") == "Under" else -past_line) > MEAN_TOLERANCE:
+                return False  # Wk 9: QB rush Unders lost to one scramble; a mean far past the line means big games are common
+    if (p.get("price") or 0) < 0 and confidence(p) < 0.5:
+        return False  # we think it hits less than half the time and the price does not pay for it
     if p.get("market_prob") is not None and p["market_prob"] < d["fair"] - 0.02:
         return False  # the prediction market is against us
     return d["ev"] > 0 and p.get("event_id") in today
@@ -96,8 +103,8 @@ def show(conn):
         if seen[group] <= PER_GROUP:
             chosen.append(p)
     print(decision.NO_EDGE_WARNING)
-    print(f"\n{len(chosen)} usable picks of {len(picks)} (kicking off in the next 24h; fringe lines, injured-out players, receiving Unders with a WR/TE teammate out, and "
-          f"picks Kalshi disagrees with are dropped; max {PER_GROUP} per market and side). Confidence is shrunk toward the "
+    print(f"\n{len(chosen)} usable picks of {len(picks)} (kicking off in the next 24h; fringe lines, injured-out players, receiving Unders with a WR/TE teammate out, Unders whose mean is 10%+ above the line, "
+          f"minus-price picks under 50% confidence, and picks Kalshi disagrees with are dropped; max {PER_GROUP} per market and side). Confidence is shrunk toward the "
           "book's price. Unvetted for roles and game script: check those before betting.\n")
     print("| # | Pick | Odds | Conf | Bets / money | Evidence | Why | Risk | Verdict |\n|---|---|---|---|---|---|---|---|---|")
     for i, p in enumerate(chosen[:TABLE_ROWS], 1):

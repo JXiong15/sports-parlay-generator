@@ -21,7 +21,20 @@ def test_prop_splits_match_names_loosely():
                           "period": None, "line": 70.5, "over_handle": 60, "under_handle": 40, "over_bets": 75,
                           "under_bets": 25}])
     assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 70.5) == (75, 60)
-    assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 71.5) is None
+    assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 71.5) == (75, 60)  # yardage books differ by a point
+    assert board._prop_splits(conn, "Kenneth Walker III", "player_rush_yds", 73.5) is None
+
+
+def test_prop_splits_fill_the_unprinted_over_side_from_the_under():
+    conn = db.connect(":memory:")
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    db.save_prop_splits(conn, {"id": 1, "league": "nfl", "link": "x", "published": today, "modified": "m",
+                               "fetched_at": "f"},
+                        [{"game": None, "player": "James Cook", "market": "player_receptions", "market_text": "x",
+                          "period": None, "line": 1.5, "over_handle": None, "under_handle": 92, "over_bets": None,
+                          "under_bets": 74}])
+    assert board._prop_splits(conn, "James Cook", "player_receptions", 1.5) == (26, 8)
 
 
 def test_other_side_price_only_at_the_matching_line():
@@ -40,3 +53,20 @@ def test_a_book_missing_one_side_is_skipped():
                              row("Green Bay Packers", -3, -112, "fanduel"), row("Dallas Cowboys", 3, -108, "fanduel")])
     book, sides = board._game_offers(conn, "e1")["spreads"]
     assert book == "fanduel" and set(sides) == {"Green Bay Packers", "Dallas Cowboys"}
+
+
+def test_prop_splits_need_the_exact_line_on_small_counts_and_prefer_the_closest_line():
+    conn = db.connect(":memory:")
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    row = lambda line, bets: {"game": None, "player": "James Cook", "market": "player_receptions", "market_text": "x",
+                              "period": None, "line": line, "over_handle": bets, "under_handle": 100 - bets,
+                              "over_bets": bets, "under_bets": 100 - bets}
+    db.save_prop_splits(conn, {"id": 1, "league": "nfl", "link": "x", "published": today, "modified": "m", "fetched_at": "f"},
+                        [row(2.5, 80)])
+    assert board._prop_splits(conn, "James Cook", "player_receptions", 1.5) is None
+    db.save_prop_splits(conn, {"id": 2, "league": "nfl", "link": "y", "published": today, "modified": "m", "fetched_at": "f"},
+                        [row(88.5, 30)])
+    db.save_prop_splits(conn, {"id": 3, "league": "nfl", "link": "z", "published": today, "modified": "m", "fetched_at": "f"},
+                        [{**row(87.5, 60), "market": "player_rush_yds"}, {**row(88.5, 40), "market": "player_rush_yds"}])
+    assert board._prop_splits(conn, "James Cook", "player_rush_yds", 87.5) == (60, 60)  # exact line beats a newer near one
